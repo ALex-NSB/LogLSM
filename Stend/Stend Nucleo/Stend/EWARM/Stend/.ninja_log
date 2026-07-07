@@ -1,0 +1,74 @@
+# ninja log v5
+28	614	7919753876593571	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/stm32l4xx_hal_msp.o	a28664276312d62d
+9	367	7919753874141775	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/main.o	f3e4502e363266d6
+16	476	7919753875218177	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.o	486d1b17c2f170ef
+25	72	7905879975127869	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/EWARM/startup_stm32l476xx.o	86fc5497f9fa5b2
+12	454	7919753874849412	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/StepDriver.o	2b5253c5a0b07067
+436	753	7919753877889244	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.o	f8afc5abe4a85fcc
+5	400	7919753874470681	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/com.o	d38c4422223a3860
+271	499	7919753875447408	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/CMSIS/system_stm32l4xx.o	ff2cca04b6c68bc7
+24	432	7919753874779639	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/wake.o	15451fef426c566f
+20	522	7919753875676647	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/stm32l4xx_it.o	7ce0e51319aac04a
+407	637	7919753876772972	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.o	b515fb6b742c55f
+484	735	7919753877829436	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.o	540aa7cb8926f5b5
+458	787	7919753878128443	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.o	e02cb00c72c3c560
+529	822	7919753878676600	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.o	86e0536d101cd4b5
+374	655	7919753876922472	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.o	e82ba121b3ca2186
+641	895	7919753879324431	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.o	b14b73c86c56b1cc
+506	776	7919753878208168	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.o	8c94645d77771992
+782	1101	7919753881467270	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.o	8983bdaac5846707
+660	883	7919753879314471	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.o	e6f03110660785da
+742	1126	7919753881726401	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.o	5665a52ff4fc03d2
+620	956	7919753879982239	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.o	a774bec1259042ed
+890	1280	7919753883271236	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.o	5d6b472216ce619b
+760	984	7919753880321113	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.o	59b29447911f9bde
+830	950	7905879983609510	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Lib/wake.o	9e522c18c9259e62
+794	1042	7919753880899167	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.o	af57c8373938e105
+902	1161	7919753882095164	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.o	36ab61f05f57c1da
+828	1503	7919753885463893	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.o	526aa3005b7969e4
+960	1383	7919753884297796	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.o	1184d652a9cc6a17
+1510	1593	7919753886430660	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.out	d88370f43cfcecf1
+1609	1639	7919753886938961	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.hex	5f74d73b9e09fc41
+1	267	7919753873135146	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/ring_buffer.o	6c3f794dd837c21a
+0	222	7919757821470644	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/com.o	d38c4422223a3860
+228	310	7919757822377609	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.out	d88370f43cfcecf1
+321	352	7919757822856008	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.hex	5f74d73b9e09fc41
+1	179	7919760036013539	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/com.o	d38c4422223a3860
+182	263	7919760036860705	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.out	d88370f43cfcecf1
+275	305	7919760037349070	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.hex	5f74d73b9e09fc41
+1	276	7919767071827464	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/com.o	d38c4422223a3860
+282	385	7919767072913830	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.out	d88370f43cfcecf1
+398	440	7919767073541729	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.hex	5f74d73b9e09fc41
+3	289	7920668445901560	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Obj/Application/User/Core/com.o	d38c4422223a3860
+293	482	7920668447835091	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.out	d88370f43cfcecf1
+494	542	7920668448492890	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/Exe/Stend.hex	5f74d73b9e09fc41
+1	42	8014626620216096	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/EWARM/startup_stm32l476xx.o	1eed466a33114947
+10	271	8014626622468565	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/wake.o	47e5c94787021f3c
+4	280	8014626622448636	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/com.o	fe8df5edf1e546c3
+7	299	8014626622707773	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/main.o	5dda78e83ae49946
+14	451	8014626624232670	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/ring_buffer.o	491f1c31e1f852d0
+24	480	8014626624491803	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/StepDriver.o	b07de086855d2c5d
+20	491	8014626624541638	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.o	64ca9344b1f6513d
+277	507	8014626624581506	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/CMSIS/system_stm32l4xx.o	95dda67d620d39d3
+285	524	8014626624840629	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.o	627ca1244b347f50
+305	549	8014626625219362	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.o	26abcc5bcceffe8b
+29	605	8014626625777504	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/stm32l4xx_it.o	5dd74cf6ec721af2
+458	686	8014626626604733	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.o	fb7bd4673b72f372
+496	706	8014626626774167	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.o	336ecb4117953aa6
+44	716	8014626626684470	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Application/User/Core/stm32l4xx_hal_msp.o	669ded96d089e0ab
+487	765	8014626626983468	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.o	cff1cdf8330f1a88
+529	839	8014626627601404	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.o	d812150be16e4c1a
+514	848	8014626627631305	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.o	48934a08939fc76e
+555	866	8014626628219335	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.o	d7f526a6e26659ba
+612	931	8014626629036593	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.o	b83fc7413e0868aa
+692	1053	8014626630262501	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.o	84c717d2fdde003c
+844	1092	8014626630641226	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.o	cf4f2e827b3ecce5
+712	1111	8014626630760838	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.o	ba654aa374daad93
+770	1117	8014626630780769	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.o	90e478cfe4be043f
+721	1186	8014626631588069	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.o	70b0368acc08b19d
+872	1281	8014626632514967	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.o	3bc4dbe8c4c8d741
+1061	1295	8014626632694370	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.o	6943e2b0b41d4eb1
+938	1382	8014626633541534	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.o	103f6185f4cf0195
+853	1517	8014626634857135	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Obj/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.o	97cf04e5c9099f0
+1523	1603	8014626635784035	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Exe/Stend.out	6fc855dc716e256f
+1627	1657	8014626636372069	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/Exe/Stend.hex	e7707e8a593c799

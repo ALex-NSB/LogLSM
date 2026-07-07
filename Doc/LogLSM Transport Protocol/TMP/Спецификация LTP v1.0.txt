@@ -1,0 +1,475 @@
+ # LTP — LogLSM Transport Protocol v1.0                                                          
+                                                                                                
+ ## 1. Назначение                                                                                
+                                                                                                
+ LTP (LogLSM Transport Protocol) — компактный бинарный транспортный протокол для embedded систем.
+                                                                                                
+ Основное назначение:                                                                            
+                                                                                                
+ * передача логов;                                                                               
+ * телеметрия;                                                                                   
+ * конфигурация устройства;                                                                      
+ * OTA обновление firmware;                                                                      
+ * диагностика;                                                                                  
+ * обмен данными между STM32 и host software.                                                    
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 2. Основные особенности                                                                       
+                                                                                                
+ Протокол:                                                                                       
+                                                                                                
+ * бинарный;                                                                                     
+ * transport-independent;                                                                        
+ * DMA-friendly;                                                                                 
+ * packet-oriented;                                                                              
+ * пригоден для USB CDC;                                                                         
+ * пригоден для UART;                                                                            
+ * пригоден для CAN/CAN FD через adapter layer;                                                  
+ * пригоден для low-power embedded systems.                                                      
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 3. Поддерживаемые транспорты                                                                  
+                                                                                                
+ ## Текущие                                                                                      
+                                                                                                
+ * USB CDC (primary)                                                                             
+ * UART                                                                                          
+                                                                                                
+ ## Будущие                                                                                      
+                                                                                                
+ * CAN FD                                                                                        
+ * BLE                                                                                           
+ * TCP tunnel                                                                                    
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 4. Архитектура                                                                                
+                                                                                                
+ ```text                                                                                         
+ Application Services                                                                            
+         v                                                                                       
+ LTP Core                                                                                        
+         v                                                                                       
+ Transport Adapter                                                                               
+         v                                                                                       
+ USB / UART / CAN                                                                                
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 5. Формат пакета                                                                              
+                                                                                                
+ ## Packet Layout                                                                                
+                                                                                                
+ ```text                                                                                         
+ +------+------+------+------+--------+--------+----------+--------+                             
+ |FEND  | VER | ADDR | CMD  | FLAGS  | SEQ16  | LEN16    | DATA   |                              
+ +------+------+------+------+--------+--------+----------+--------+                             
+ | CRC16                                                          |                              
+ +----------------------------------------------------------------+                              
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 6. Описание полей                                                                             
+                                                                                                
+ ## FEND                                                                                         
+                                                                                                
+ Frame delimiter.                                                                                
+                                                                                                
+ Значение:                                                                                       
+                                                                                                
+ ```text                                                                                         
+ 0x7E                                                                                            
+ ```                                                                                             
+                                                                                                
+ Используется:                                                                                   
+                                                                                                
+ * для packet synchronization;                                                                   
+ * parser resync;                                                                                
+ * stream framing.                                                                               
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## VER                                                                                          
+                                                                                                
+ Версия протокола.                                                                               
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ 1 byte                                                                                          
+ ```                                                                                             
+                                                                                                
+ Текущая версия:                                                                                 
+                                                                                                
+ ```text                                                                                         
+ 0x01                                                                                            
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## ADDR                                                                                         
+                                                                                                
+ Адрес устройства.                                                                               
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ 1 byte                                                                                          
+ ```                                                                                             
+                                                                                                
+ ### Рекомендуемое распределение                                                                 
+                                                                                                
+ | Address   | Назначение        |                                                               
+ | --------- | ----------------- |                                                               
+ | 0x00      | Broadcast         |                                                               
+ | 0x01      | Main Logger       |                                                               
+ | 0x10-0x1F | Sensor modules    |                                                               
+ | 0x20-0x2F | Expansion modules |                                                               
+ | 0xF0      | Bootloader        |                                                               
+ | 0xFF      | Host PC           |                                                               
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## CMD                                                                                          
+                                                                                                
+ Команда или тип сообщения.                                                                      
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ 1 byte                                                                                          
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## FLAGS                                                                                        
+                                                                                                
+ Флаги пакета.                                                                                   
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ 1 byte                                                                                          
+ ```                                                                                             
+                                                                                                
+ ### Flags Definition                                                                            
+                                                                                                
+ | Bit | Name         | Description       |                                                      
+ | --- | ------------ | ----------------- |                                                      
+ | 0   | ACK_REQUIRED | Требуется ACK     |                                                      
+ | 1   | IS_ACK       | ACK packet        |                                                      
+ | 2   | IS_NACK      | NACK packet       |                                                      
+ | 3   | FRAGMENTED   | Fragmented packet |                                                      
+ | 4   | RESERVED     | Reserved          |                                                      
+ | 5   | RESERVED     | Reserved          |                                                      
+ | 6   | PRIORITY     | High priority     |                                                      
+ | 7   | RESERVED     | Reserved          |                                                      
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## SEQ16                                                                                        
+                                                                                                
+ Sequence number.                                                                                
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ uint16_t                                                                                        
+ ```                                                                                             
+                                                                                                
+ Используется:                                                                                   
+                                                                                                
+ * retransmission;                                                                               
+ * duplicate detection;                                                                          
+ * ACK matching;                                                                                 
+ * OTA reliability.                                                                              
+                                                                                                
+ Wrap-around:                                                                                    
+                                                                                                
+ ```text                                                                                         
+ 0xFFFF > 0x0000                                                                                 
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## LEN16                                                                                        
+                                                                                                
+ Размер payload.                                                                                 
+                                                                                                
+ Размер:                                                                                         
+                                                                                                
+ ```text                                                                                         
+ uint16_t                                                                                        
+ ```                                                                                             
+                                                                                                
+ Максимум:                                                                                       
+                                                                                                
+ ```text                                                                                         
+ 65535 bytes                                                                                     
+ ```                                                                                             
+                                                                                                
+ Рекомендуемые размеры:                                                                          
+                                                                                                
+ * UART: 256 bytes                                                                               
+ * USB CDC: 512-2048 bytes                                                                       
+ * CAN FD: 64 bytes fragments                                                                    
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## DATA                                                                                         
+                                                                                                
+ Payload.                                                                                        
+                                                                                                
+ Содержимое зависит от CMD.                                                                      
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## CRC16                                                                                        
+                                                                                                
+ Контрольная сумма.                                                                              
+                                                                                                
+ Алгоритм:                                                                                       
+                                                                                                
+ ```text                                                                                         
+ CRC16-CCITT                                                                                     
+ ```                                                                                             
+                                                                                                
+ Parameters:                                                                                     
+                                                                                                
+ ```text                                                                                         
+ POLY = 0x1021                                                                                   
+ INIT = 0xFFFF                                                                                   
+ ```                                                                                             
+                                                                                                
+ CRC вычисляется:                                                                                
+                                                                                                
+ * начиная с VER;                                                                                
+ * заканчивая последним байтом DATA.                                                             
+                                                                                                
+ FEND не включается в CRC.                                                                       
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 7. Escaping                                                                                   
+                                                                                                
+ Для stream transports используется escaping.                                                    
+                                                                                                
+ ## Escape byte                                                                                  
+                                                                                                
+ ```text                                                                                         
+ 0x7D                                                                                            
+ ```                                                                                             
+                                                                                                
+ ## Правила                                                                                      
+                                                                                                
+ | Byte | Encoded   |                                                                            
+ | ---- | --------- |                                                                            
+ | 0x7E | 0x7D 0x5E |                                                                            
+ | 0x7D | 0x7D 0x5D |                                                                            
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 8. Команды                                                                                    
+                                                                                                
+ ## Core Commands                                                                                
+                                                                                                
+ | CMD  | Name        |                                                                          
+ | ---- | ----------- |                                                                          
+ | 0x01 | HELLO       |                                                                          
+ | 0x02 | ACK         |                                                                          
+ | 0x03 | NACK        |                                                                          
+ | 0x10 | LOG_DATA    |                                                                          
+ | 0x11 | SENSOR_DATA |                                                                          
+ | 0x12 | STATUS      |                                                                          
+ | 0x20 | CONFIG_GET  |                                                                          
+ | 0x21 | CONFIG_SET  |                                                                          
+ | 0x30 | TIME_SYNC   |                                                                          
+ | 0x40 | FILE_BEGIN  |                                                                          
+ | 0x41 | FILE_DATA   |                                                                          
+ | 0x42 | FILE_END    |                                                                          
+ | 0x70 | OTA_BEGIN   |                                                                          
+ | 0x71 | OTA_DATA    |                                                                          
+ | 0x72 | OTA_END     |                                                                          
+ | 0xF0 | DEBUG       |                                                                          
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 9. ACK/NACK                                                                                   
+                                                                                                
+ ## ACK Packet                                                                                   
+                                                                                                
+ Payload:                                                                                        
+                                                                                                
+ ```text                                                                                         
+ SEQ16                                                                                           
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## NACK Packet                                                                                  
+                                                                                                
+ Payload:                                                                                        
+                                                                                                
+ ```text                                                                                         
+ SEQ16 + ERROR_CODE                                                                              
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 10. Error Codes                                                                               
+                                                                                                
+ | Code | Meaning         |                                                                      
+ | ---- | --------------- |                                                                      
+ | 0x01 | CRC_ERROR       |                                                                      
+ | 0x02 | INVALID_LENGTH  |                                                                      
+ | 0x03 | UNKNOWN_COMMAND |                                                                      
+ | 0x04 | TIMEOUT         |                                                                      
+ | 0x05 | BUSY            |                                                                      
+ | 0x06 | ACCESS_DENIED   |                                                                      
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 11. Fragmentation                                                                             
+                                                                                                
+ Используется:                                                                                   
+                                                                                                
+ * OTA;                                                                                          
+ * file transfer;                                                                                
+ * large telemetry.                                                                              
+                                                                                                
+ При FLAGS.FRAGMENTED = 1:                                                                       
+                                                                                                
+ ```text                                                                                         
+ FRAG_ID                                                                                         
+ FRAG_INDEX                                                                                      
+ FRAG_TOTAL                                                                                      
+ DATA                                                                                            
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 12. Reliability Modes                                                                         
+                                                                                                
+ ## Mode 0 — Unreliable                                                                          
+                                                                                                
+ Без ACK.                                                                                        
+                                                                                                
+ Используется:                                                                                   
+                                                                                                
+ * logs;                                                                                         
+ * telemetry.                                                                                    
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ ## Mode 1 — Reliable                                                                            
+                                                                                                
+ ACK + retransmission.                                                                           
+                                                                                                
+ Используется:                                                                                   
+                                                                                                
+ * configuration;                                                                                
+ * OTA;                                                                                          
+ * flash operations.                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 13. Parser FSM                                                                                
+                                                                                                
+ Рекомендуемая state machine:                                                                    
+                                                                                                
+ ```text                                                                                         
+ WAIT_FEND                                                                                       
+ READ_HEADER                                                                                     
+ READ_PAYLOAD                                                                                    
+ READ_CRC                                                                                        
+ VALIDATE                                                                                        
+ DISPATCH                                                                                        
+ ```                                                                                             
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 14. DMA Integration                                                                           
+                                                                                                
+ Протокол предназначен для:                                                                      
+                                                                                                
+ * circular DMA RX;                                                                              
+ * zero-copy parsing;                                                                            
+ * ring buffers.                                                                                 
+                                                                                                
+ Рекомендуется:                                                                                  
+                                                                                                
+ * parser task/thread;                                                                           
+ * ISR minimal processing;                                                                       
+ * no dynamic allocation.                                                                        
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 15. CAN/CAN FD Support                                                                        
+                                                                                                
+ LTP поддерживает CAN/CAN FD через transport adapter.                                            
+                                                                                                
+ LTP packet:                                                                                     
+                                                                                                
+ * не изменяется;                                                                                
+ * фрагментируется transport layer.                                                              
+                                                                                                
+ Это обеспечивает:                                                                               
+                                                                                                
+ * единый protocol stack;                                                                        
+ * единый OTA;                                                                                   
+ * единый Qt host software.                                                                      
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 16. Bootloader Compatibility                                                                  
+                                                                                                
+ LTP должен поддерживаться:                                                                      
+                                                                                                
+ * application firmware;                                                                         
+ * bootloader firmware.                                                                          
+                                                                                                
+ Это обеспечивает:                                                                               
+                                                                                                
+ * единый updater;                                                                               
+ * единый protocol parser;                                                                       
+ * единый Qt host.                                                                               
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 17. Рекомендации по реализации                                                                
+                                                                                                
+ Рекомендуется:                                                                                  
+                                                                                                
+ * static buffers;                                                                               
+ * fixed-size queues;                                                                            
+ * no malloc/free;                                                                               
+ * deterministic execution;                                                                      
+ * ISR-safe API.                                                                                 
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 18. Совместимость                                                                             
+                                                                                                
+ Протокол протестирован/ориентирован на:                                                         
+                                                                                                
+ * STM32L4;                                                                                      
+ * STM32G4;                                                                                      
+ * STM32F4;                                                                                      
+ * Qt6 host software.                                                                            
+                                                                                                
+ ---                                                                                             
+                                                                                                
+ # 19. Будущие расширения                                                                        
+                                                                                                
+ Возможные future features:                                                                      
+                                                                                                
+ * encryption;                                                                                   
+ * compression;                                                                                  
+ * device discovery;                                                                             
+ * routing;                                                                                      
+ * multi-channel streams;                                                                        
+ * remote diagnostics.                                                                           

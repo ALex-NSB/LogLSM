@@ -1,0 +1,541 @@
+     
+     Руководство по заполнению таблицы GPIO Policy Matrix                      
+     Назначение документа                                                      
+                                                                          
+     Таблица GPIO Policy Matrix используется для централизованного описания:   
+                                                                          
+     назначения каждого вывода микроконтроллера;                               
+     режима работы вывода в разных состояниях устройства;                      
+     ограничений по использованию;                                             
+     источников пробуждения;                                                   
+     принадлежности к модулям;                                                 
+     энергопотребления и безопасных состояний.                                 
+                                                                          
+     Документ применяется при:                                                 
+                                                                          
+     разработке hardware;                                                      
+     разработке firmware;                                                      
+     генерации BSP;                                                            
+     проверке power budget;                                                    
+     ревью схемотехники;                                                       
+     подготовке production firmware.                                           
+     Общие правила заполнения                                                  
+     1. Один вывод = одна строка                                               
+                                                                          
+     Каждый GPIO/пин микроконтроллера описывается отдельной строкой.           
+                                                                          
+     Пример:                                                                   
+                                                                          
+     Pin Number	Pin Name                                                       
+     15	PA0                                                                    
+     16	PA1                                                                    
+     2. Не оставлять критические поля пустыми                                  
+                                                                          
+     Обязательные поля:                                                        
+                                                                          
+     Pin Number                                                                
+     Pin Name                                                                  
+     Signal Name                                                               
+     Mode                                                                      
+     RESET State                                                               
+     PASSIVE State                                                             
+     WORK State                                                                
+     3. Использовать единый стиль именования                                   
+                                                                          
+     Рекомендуется:                                                            
+                                                                          
+     Сигналы                                                                   
+     LED_STATUS                                                                
+     UART_DEBUG_TX                                                             
+     SENSOR_PWR_EN                                                             
+     BAT_MEAS                                                                  
+     Режимы                                                                    
+     INPUT                                                                     
+     OUTPUT_PP                                                                 
+     OUTPUT_OD                                                                 
+     ANALOG                                                                    
+     AF_UART                                                                   
+     AF_SPI                                                                    
+     AF_I2C                                                                    
+     Состояния                                                                 
+     HIGH                                                                      
+     LOW                                                                       
+     Hi-Z                                                                      
+     PULL-UP                                                                   
+     PULL-DOWN                                                                 
+     ANALOG                                                                    
+     Описание столбцов                                                         
+     1. Pin Number                                                             
+     Назначение                                                                
+                                                                          
+     Физический номер вывода микроконтроллера согласно datasheet/package.      
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Номер пина корпуса.                                                       
+                                                                          
+     Пример                                                                    
+     Pin Number                                                                
+     15                                                                        
+     48                                                                        
+     Примечания                                                                
+     Должен соответствовать выбранному package.                                
+     Используется для сверки со схемой PCB.                                    
+     2. Pin Name                                                               
+     Назначение                                                                
+                                                                          
+     Внутреннее имя GPIO в микроконтроллере.                                   
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Стандартное имя порта:                                                    
+                                                                          
+     PA0                                                                       
+     PB5                                                                       
+     PC13                                                                      
+     Пример                                                                    
+     Pin Name                                                                  
+     PA2                                                                       
+     PB11                                                                      
+     Примечания                                                                
+     Имя должно полностью совпадать с STM32CubeMX/datasheet.                   
+     Используется firmware и BSP.                                              
+     3. Signal Name                                                            
+     Назначение                                                                
+                                                                          
+     Логическое имя сигнала в проекте.                                         
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Функцию сигнала в системе.                                                
+                                                                          
+     Пример                                                                    
+     Signal Name                                                               
+     UART_DBG_TX                                                               
+     SENSOR_INT                                                                
+     GPS_PWR_EN                                                                
+     Рекомендации                                                              
+                                                                          
+     Использовать:                                                             
+                                                                          
+     <DEVICE>_<FUNCTION>                                                       
+                                                                          
+     или                                                                       
+                                                                          
+     <FUNCTION>_<DIR>                                                          
+     4. Peripheral                                                             
+     Назначение                                                                
+                                                                          
+     Указывает периферию микроконтроллера, использующую пин.                   
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Например:                                                                 
+                                                                          
+     GPIO                                                                      
+     USART1                                                                    
+     SPI2                                                                      
+     I2C1                                                                      
+     ADC1                                                                      
+     LPTIM1                                                                    
+     RTC                                                                       
+     Пример                                                                    
+     Peripheral                                                                
+     USART2                                                                    
+     ADC1                                                                      
+     GPIO                                                                      
+     Примечания                                                                
+                                                                          
+     Если пин используется как обычный GPIO — указывать GPIO.                  
+                                                                          
+     5. Mode                                                                   
+     Назначение                                                                
+                                                                          
+     Определяет электрический режим работы вывода.                             
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Тип режима GPIO.                                                          
+                                                                          
+     Типовые значения                                                          
+     Значение	Описание                                                         
+     INPUT	Цифровой вход                                                      
+     OUTPUT_PP	Push-Pull выход                                                
+     OUTPUT_OD	Open-Drain выход                                               
+     ANALOG	Аналоговый режим                                                   
+     AF_UART	Alternate Function UART                                          
+     AF_SPI	Alternate Function SPI                                             
+     AF_I2C	Alternate Function I2C                                             
+     AF_TIM	Таймер/PWM                                                         
+     Примечания                                                                
+                                                                          
+     Для low-power желательно использовать:                                    
+                                                                          
+     ANALOG                                                                    
+                                                                          
+     для неиспользуемых GPIO.                                                  
+                                                                          
+     6. Direction                                                              
+     Назначение                                                                
+                                                                          
+     Показывает направление передачи сигнала.                                  
+                                                                          
+     Возможные значения                                                        
+     Значение	Описание                                                         
+     INPUT	Вход                                                               
+     OUTPUT	Выход                                                              
+     BIDIR	Двунаправленный                                                    
+     Пример                                                                    
+     Direction                                                                 
+     INPUT                                                                     
+     OUTPUT                                                                    
+     Примечания                                                                
+                                                                          
+     Для интерфейсов I2C использовать:                                         
+                                                                          
+     BIDIR                                                                     
+     7. Wake Source                                                            
+     Назначение                                                                
+                                                                          
+     Определяет, может ли данный пин пробуждать устройство из low-power режима.
+                                                                          
+     Возможные значения                                                        
+     Значение	Описание                                                         
+     YES	Может будить систему                                                 
+     NO	Не используется как wake source                                        
+     Пример                                                                    
+     Wake Source                                                               
+     YES                                                                       
+     NO                                                                        
+     Примечания                                                                
+                                                                          
+     Особенно важно для:                                                       
+                                                                          
+     кнопок;                                                                   
+     RTC interrupt;                                                            
+     external interrupt;                                                       
+     датчиков движения;                                                        
+     modem IRQ.                                                                
+     8. Wake Transition                                                        
+     Назначение                                                                
+                                                                          
+     Указывает событие, вызывающее пробуждение.                                
+                                                                          
+     Возможные значения                                                        
+     Значение	Описание                                                         
+     RISING	Фронт вверх                                                        
+     FALLING	Фронт вниз                                                       
+     BOTH	Оба фронта                                                           
+     LEVEL_HIGH	Высокий уровень                                                
+     LEVEL_LOW	Низкий уровень                                                 
+     Пример                                                                    
+     Wake Transition                                                           
+     FALLING                                                                   
+     RISING                                                                    
+     Примечания                                                                
+                                                                          
+     Должно соответствовать EXTI configuration.                                
+                                                                          
+     9. RESET State                                                            
+     Назначение                                                                
+                                                                          
+     Состояние пина сразу после reset.                                         
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Фактическое или требуемое состояние.                                      
+                                                                          
+     Типовые значения                                                          
+     Значение	Описание                                                         
+     Hi-Z	Высокоимпедансное                                                    
+     LOW	Низкий уровень                                                       
+     HIGH	Высокий уровень                                                      
+     ANALOG	Аналоговый режим                                                   
+     PULL-UP	Подтяжка вверх                                                   
+     PULL-DOWN	Подтяжка вниз                                                  
+     Примечания                                                                
+                                                                          
+     Важно для:                                                                
+                                                                          
+     безопасного старта;                                                       
+     исключения паразитного потребления;                                       
+     предотвращения ложного включения внешних устройств.                       
+     10. PASSIVE State                                                         
+     Назначение                                                                
+                                                                          
+     Состояние GPIO в режиме минимального энергопотребления.                   
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Конфигурацию пина в sleep/stop/standby.                                   
+                                                                          
+     Рекомендуемые значения                                                    
+     Значение	Когда использовать                                               
+     ANALOG	Неиспользуемый GPIO                                                
+     LOW	Управляющие линии                                                    
+     Hi-Z	Если линия внешне подтянута                                          
+     Примечания                                                                
+                                                                          
+     Это один из ключевых столбцов для power optimization.                     
+                                                                          
+     11. WORK State                                                            
+     Назначение                                                                
+                                                                          
+     Состояние GPIO в нормальном рабочем режиме устройства.                    
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Рабочую конфигурацию линии.                                               
+                                                                          
+     Пример                                                                    
+     WORK State                                                                
+     AF_UART                                                                   
+     OUTPUT HIGH                                                               
+     ADC INPUT                                                                 
+     Примечания                                                                
+                                                                          
+     Это основное состояние during runtime.                                    
+                                                                          
+     12. SERVICE State                                                         
+     Назначение                                                                
+                                                                          
+     Состояние GPIO в сервисном/отладочном режиме.                             
+                                                                          
+     Что указывать                                                             
+                                                                          
+     Конфигурацию для:                                                         
+                                                                          
+     factory mode;                                                             
+     debug;                                                                    
+     firmware update;                                                          
+     диагностики.                                                              
+     Пример                                                                    
+     SERVICE State                                                             
+     SWD ENABLED                                                               
+     UART DEBUG                                                                
+     GPIO TEST                                                                 
+     Примечания                                                                
+                                                                          
+     Может отличаться от WORK State.                                           
+                                                                          
+     13. Module Assignable                                                     
+     Назначение                                                                
+                                                                          
+     Показывает, может ли пин быть переназначен модулем расширения.            
+                                                                          
+     Возможные значения                                                        
+     Значение	Описание                                                         
+     YES	Разрешено использование модулем                                      
+     NO	Зарезервирован системно                                                
+     Примечания                                                                
+                                                                          
+     Используется в модульной архитектуре.                                     
+                                                                          
+     14. Module Variant                                                        
+     Назначение                                                                
+                                                                          
+     Указывает, для каких модульных конфигураций применяется GPIO.             
+                                                                          
+     Пример значений                                                           
+     BASE                                                                      
+     GPS_MODULE                                                                
+     LTE_MODULE                                                                
+     SENSOR_MODULE                                                             
+     ALL                                                                       
+     Примечания                                                                
+                                                                          
+     Позволяет вести единый GPIO matrix для разных SKU.                        
+                                                                          
+     15. Reserved                                                              
+     Назначение                                                                
+                                                                          
+     Флаг резервирования GPIO.                                                 
+                                                                          
+     Возможные значения                                                        
+     Значение	Описание                                                         
+     YES	Зарезервирован                                                       
+     NO	Доступен                                                               
+     Когда использовать                                                        
+     future expansion;                                                         
+     production options;                                                       
+     test points;                                                              
+     manufacturing.                                                            
+     16. Default State                                                         
+     Назначение                                                                
+                                                                          
+     Состояние GPIO по умолчанию после инициализации firmware.                 
+                                                                          
+     Пример                                                                    
+     Default State                                                             
+     LOW                                                                       
+     HIGH                                                                      
+     ANALOG                                                                    
+     Отличие от RESET State                                                    
+     RESET State	Default State                                                
+     Состояние после аппаратного reset	Состояние после инициализации firmware 
+     17. Power Domain                                                          
+     Назначение                                                                
+                                                                          
+     Указывает домен питания, к которому относится GPIO.                       
+                                                                          
+     Пример значений                                                           
+     VBAT                                                                      
+     VDD_MAIN                                                                  
+     VDD_SENSOR                                                                
+     BACKUP                                                                    
+     ALWAYS_ON                                                                 
+     Примечания                                                                
+                                                                          
+     Используется для:                                                         
+                                                                          
+     power budgeting;                                                          
+     sequencing;                                                               
+     sleep management.                                                         
+     18. Notes                                                                 
+     Назначение                                                                
+                                                                          
+     Дополнительные инженерные комментарии.                                    
+                                                                          
+     Что указывать                                                             
+     ограничения;                                                              
+     особенности схемы;                                                        
+     зависимости;                                                              
+     errata;                                                                   
+     комментарии по EMC;                                                       
+     требования production.                                                    
+     Пример                                                                    
+     External pull-up 10k                                                      
+     Do not drive HIGH during reset                                            
+     Used only in LTE variant                                                  
+     Shared with test connector                                                
+     Рекомендуемый workflow заполнения                                         
+     Шаг 1. Импорт pinout                                                      
+                                                                          
+     Заполнить:                                                                
+                                                                          
+     Pin Number                                                                
+     Pin Name                                                                  
+     Peripheral                                                                
+                                                                          
+     на основе datasheet/CubeMX.                                               
+                                                                          
+     Шаг 2. Назначение сигналов                                                
+                                                                          
+     Заполнить:                                                                
+                                                                          
+     Signal Name                                                               
+     Direction                                                                 
+     Mode                                                                      
+     Шаг 3. Определение power states                                           
+                                                                          
+     Заполнить:                                                                
+                                                                          
+     RESET State                                                               
+     PASSIVE State                                                             
+     WORK State                                                                
+     SERVICE State                                                             
+     Шаг 4. Wakeup configuration                                               
+                                                                          
+     Заполнить:                                                                
+                                                                          
+     Wake Source                                                               
+     Wake Transition                                                           
+     Шаг 5. Модульность и резервирование                                       
+                                                                          
+     Заполнить:                                                                
+                                                                          
+     Module Assignable                                                         
+     Module Variant                                                            
+     Reserved                                                                  
+     Шаг 6. Проверка power consistency                                         
+                                                                          
+     Проверить:                                                                
+                                                                          
+     нет floating GPIO;                                                        
+     нет конфликтующих выходов;                                                
+     unused pins переведены в ANALOG;                                          
+     wake pins настроены корректно.                                            
+     Типичные ошибки                                                           
+     Ошибка 1. Floating input                                                  
+                                                                          
+     Плохо:                                                                    
+                                                                          
+     INPUT без pull-up/pull-down                                               
+                                                                          
+     Последствия:                                                              
+                                                                          
+     лишнее потребление;                                                       
+     ложные wakeup.                                                            
+     Ошибка 2. Конфликт состояний                                              
+                                                                          
+     Например:                                                                 
+                                                                          
+     внешний pull-up;                                                          
+     GPIO тянет LOW.                                                           
+                                                                          
+     Последствия:                                                              
+                                                                          
+     повышенное потребление;                                                   
+     перегрев;                                                                 
+     нестабильность.                                                           
+     Ошибка 3. Неопределенный RESET state                                      
+                                                                          
+     Может вызывать:                                                           
+                                                                          
+     ложное включение питания модулей;                                         
+     reset периферии;                                                          
+     boot issues.                                                              
+     Ошибка 4. Неучтенный wake source                                          
+                                                                          
+     Последствия:                                                              
+                                                                          
+     устройство не просыпается;                                                
+     паразитные пробуждения.                                                   
+     Рекомендации для STM32L4 Low Power                                        
+                                                                          
+     Для STM32L433 рекомендуется:                                              
+                                                                          
+     Ситуация	Рекомендация                                                     
+     Неиспользуемые GPIO	ANALOG                                               
+     Wakeup lines	EXTI + pull configuration                                    
+     Open drain lines	Проверять external pull-up                               
+     STOP mode	Минимизировать активные outputs                                
+     SWD	Отключать в production sleep                                         
+     Пример заполненной строки                                                 
+     Поле	Значение                                                             
+     Pin Number	15                                                             
+     Pin Name	PA2                                                              
+     Signal Name	UART_DBG_TX                                                  
+     Peripheral	USART2                                                         
+     Mode	AF_UART                                                              
+     Direction	OUTPUT                                                         
+     Wake Source	NO                                                           
+     Wake Transition	-                                                        
+     RESET State	Hi-Z                                                         
+     PASSIVE State	ANALOG                                                     
+     WORK State	AF_UART                                                        
+     SERVICE State	UART DEBUG                                                 
+     Module Assignable	NO                                                     
+     Module Variant	ALL                                                        
+     Reserved	NO                                                               
+     Default State	AF_UART                                                    
+     Power Domain	VDD_MAIN                                                     
+     Notes	Debug console                                                      
+     Итог                                                                      
+                                                                          
+     GPIO Policy Matrix является центральным документом для:                   
+                                                                          
+     firmware architecture;                                                    
+     low power design;                                                         
+     hardware integration;                                                     
+     module compatibility;                                                     
+     production configuration;                                                 
+     BSP generation.                                                           
+                                                                          
+     Корректное заполнение таблицы позволяет:                                  
+                                                                          
+     уменьшить энергопотребление;                                              
+     исключить конфликты GPIO;                                                 
+     упростить поддержку firmware;                                             
+     стандартизировать hardware abstraction;                                   
+     ускорить bring-up и debug.                                                

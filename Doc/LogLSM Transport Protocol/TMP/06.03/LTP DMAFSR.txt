@@ -1,0 +1,461 @@
+        
+    добавлена современная DMA/FSM architecture в чем это заключается    
+                                                                
+    Это один из самых важных моментов архитектуры LTP.              
+                                                                
+    Когда написано:                                                 
+                                                                
+    добавлена современная DMA/FSM architecture                      
+                                                                
+    имеется в виду, что протокол проектируется не как:              
+                                                                
+    прочитал пакет -> обработал пакет                               
+                                                                
+    как делалось в старых UART протоколах,                          
+                                                                
+    а как:                                                          
+                                                                
+    непрерывная потоковая обработка данных                          
+                                                                
+    через:                                                          
+                                                                
+    DMA;                                                            
+    ring buffer;                                                    
+    FSM parser.                                                     
+    Как работал старый WAKE                                         
+                                                                
+    Типичная старая архитектура:                                    
+                                                                
+    UART IRQ -> byte receive -> parser                              
+                                                                
+    или:                                                            
+                                                                
+    while(uart_rx_ready)                                            
+    Что это означает                                                
+                                                                
+    MCU:                                                            
+                                                                
+    просыпается на каждый байт;                                     
+    постоянно ловит interrupts;                                     
+    parser работает byte-by-byte в ISR;                             
+    высокий overhead CPU.                                           
+    Проблемы старого подхода                                        
+    1. Высокое энергопотребление                                    
+                                                                
+    На STM32L4 это особенно плохо.                                  
+                                                                
+    MCU не может долго спать.                                       
+                                                                
+    2. Большая interrupt нагрузка                                   
+                                                                
+    Например:                                                       
+                                                                
+    UART 115200:                                                    
+                                                                
+    ?11 500 interrupts/sec                                          
+                                                                
+    если по байту.                                                  
+                                                                
+    3. Плохая устойчивость к fragmentation                          
+                                                                
+    USB/UART stream приходит кусками:                               
+                                                                
+    3 байта;                                                        
+    потом 17;                                                       
+    потом 1;                                                        
+    потом 40.                                                       
+                                                                
+    Старые parser часто этого не любят.                             
+                                                                
+    Что делает современная DMA/FSM architecture                     
+    Шаг 1 — DMA принимает поток                                     
+                                                                
+    UART RX работает через DMA:                                     
+                                                                
+    UART -> DMA -> Ring Buffer                                      
+                                                                
+    MCU вообще не трогает каждый байт.                              
+                                                                
+    Шаг 2 — данные копятся в ring buffer                            
+                                                                
+    Например:                                                       
+                                                                
+    RX Ring Buffer = 1024 bytes                                     
+                                                                
+    DMA циклически пишет туда stream.                               
+                                                                
+    Шаг 3 — FSM parser читает поток                                 
+                                                                
+    Не UART вызывает parser.                                        
+                                                                
+    А parser сам читает stream из ring buffer:                      
+                                                                
+    while(data_available)                                           
+        FSM_ParseByte()                                             
+    Почему это огромная разница                                     
+    FSM parser работает как state machine                           
+                                                                
+    Например:                                                       
+                                                                
+    State                                                           
+    WAIT_FEND                                                       
+    READ_HEADER                                                     
+    READ_PAYLOAD                                                    
+    READ_CRC                                                        
+    ESCAPE                                                          
+    PACKET_DONE                                                     
+    ERROR                                                           
+    То есть parser понимает контекст                                
+                                                                
+    А не просто:                                                    
+                                                                
+    пришел байт                                                     
+    Это дает устойчивость к fragmentation                           
+                                                                
+    Например packet:                                                
+                                                                
+    C0 01 02 10 ...                                                 
+                                                                
+    может прийти как:                                               
+                                                                
+    C0 01                                                           
+                                                                
+    потом:                                                          
+                                                                
+    02                                                              
+                                                                
+    потом:                                                          
+                                                                
+    10 ...                                                          
+                                                                
+    FSM parser спокойно продолжит.                                  
+                                                                
+    Старые parser часто ломались                                    
+                                                                
+    Потому что ожидали:                                             
+                                                                
+    packet arrived completely                                       
+    DMA architecture дает еще одно преимущество                     
+    CPU почти не участвует                                          
+                                                                
+    UART поток идет:                                                
+                                                                
+    peripheral -> DMA -> RAM                                        
+                                                                
+    без CPU.                                                        
+                                                                
+    Для low-power это идеально                                      
+                                                                
+    STM32 может:                                                    
+                                                                
+    спать;                                                          
+    просыпаться редко;                                              
+    обрабатывать пакет chunk-wise.                                  
+    Это особенно важно для LogLSM                                   
+                                                                
+    Потому что у тебя:                                              
+                                                                
+    logging;                                                        
+    telemetry;                                                      
+    USB CDC;                                                        
+    expansion modules;                                              
+    long-running streams.                                           
+    Еще важный момент                                               
+                                                                
+    FSM parser умеет recovery.                                      
+                                                                
+    Например поврежден packet                                       
+                                                                
+    CRC fail.                                                       
+                                                                
+    FSM:                                                            
+                                                                
+    discard packet                                                  
+    search next FEND                                                
+    recover stream                                                  
+    Старые parser часто теряли синхронизацию полностью              
+                                                                
+    И требовали:                                                    
+                                                                
+    reset UART;                                                     
+    reconnect;                                                      
+    timeout recovery.                                               
+    В LTP recovery встроен архитектурно                             
+                                                                
+    Это уже современный stream transport подход.                    
+                                                                
+    По сути LTP ближе к                                             
+    Система                                                         
+    HDLC                                                            
+    PPP                                                             
+    USB stream parsers                                              
+    modem parsers                                                   
+    BLE stacks                                                      
+    TCP stream FSM                                                  
+                                                                
+    чем к старым UART command parsers.                              
+                                                                
+    Самое главное                                                   
+                                                                
+    LTP parser работает с:                                          
+                                                                
+    continuous byte stream                                          
+                                                                
+    а не с:                                                         
+                                                                
+    готовыми пакетами                                               
+                                                                
+    И это ключевое отличие современной transport architecture.   
+    
+    -------------------------------------------------------------
+    
+     добавлена modular layered architecture в чем это заключается                                                            
+                                                                                                                      
+    Это второй ключевой момент LTP после DMA/FSM architecture.                                                            
+                                                                                                                      
+    Когда написано:                                                                                                       
+                                                                                                                      
+    добавлена modular layered architecture                                                                                
+                                                                                                                      
+    имеется в виду, что протокол разделен на независимые уровни (layers), и каждый уровень отвечает только за свою задачу.
+                                                                                                                      
+    Как обычно делались старые UART протоколы                                                                             
+                                                                                                                      
+    Очень часто всё выглядело так:                                                                                        
+                                                                                                                      
+    uart_receive_byte()                                                                                                   
+    {                                                                                                                     
+        parse_packet();                                                                                                   
+        check_crc();                                                                                                      
+        process_command();                                                                                                
+        write_flash();                                                                                                    
+        send_response();                                                                                                  
+    }                                                                                                                     
+    То есть всё смешано                                                                                                   
+                                                                                                                      
+    В одном месте:                                                                                                        
+                                                                                                                      
+    UART;                                                                                                                 
+    parser;                                                                                                               
+    CRC;                                                                                                                  
+    команды;                                                                                                              
+    application logic.                                                                                                    
+    Проблемы такого подхода                                                                                               
+    1. Невозможно масштабировать                                                                                          
+                                                                                                                      
+    Добавил:                                                                                                              
+                                                                                                                      
+    USB;                                                                                                                  
+    BLE;                                                                                                                  
+    RS485;                                                                                                                
+                                                                                                                      
+    и parser ломается.                                                                                                    
+                                                                                                                      
+    2. Невозможно переиспользовать                                                                                        
+                                                                                                                      
+    Весь код жестко связан.                                                                                               
+                                                                                                                      
+    3. Невозможно тестировать отдельно                                                                                    
+                                                                                                                      
+    Parser зависит от UART.                                                                                               
+    Application зависит от parser.                                                                                        
+                                                                                                                      
+    4. Огромная связанность (coupling)                                                                                    
+                                                                                                                      
+    Любое изменение ломает половину проекта.                                                                              
+                                                                                                                      
+    Что делает layered architecture                                                                                       
+                                                                                                                      
+    LTP разделяет систему на независимые слои.                                                                            
+                                                                                                                      
+    Layer 1 — Physical Layer                                                                                              
+                                                                                                                      
+    Только доставка байтов.                                                                                               
+                                                                                                                      
+    Не знает:                                                                                                             
+                                                                                                                      
+    packet;                                                                                                               
+    CRC;                                                                                                                  
+    commands.                                                                                                             
+    Например                                                                                                              
+    UART                                                                                                                  
+    USB CDC                                                                                                               
+    RS485                                                                                                                 
+    BLE UART                                                                                                              
+    Задача physical layer                                                                                                 
+                                                                                                                      
+    Только:                                                                                                               
+                                                                                                                      
+    send bytes                                                                                                            
+    receive bytes                                                                                                         
+    Layer 2 — Framing Layer                                                                                               
+                                                                                                                      
+    Отвечает только за stream framing.                                                                                    
+                                                                                                                      
+    Он знает:                                                                                                             
+    FEND                                                                                                                  
+    FESC                                                                                                                  
+    escaping                                                                                                              
+    byte stuffing                                                                                                         
+    Но не знает:                                                                                                          
+    telemetry;                                                                                                            
+    commands;                                                                                                             
+    logger;                                                                                                               
+    flash.                                                                                                                
+    Layer 3 — Transport Layer                                                                                             
+                                                                                                                      
+    Уже знает packet structure:                                                                                           
+                                                                                                                      
+    ADDR                                                                                                                  
+    CMD                                                                                                                   
+    FLAGS                                                                                                                 
+    SEQ                                                                                                                   
+    LEN                                                                                                                   
+    CRC                                                                                                                   
+    Но transport layer не знает:                                                                                          
+    что такое sensor;                                                                                                     
+    что такое logger;                                                                                                     
+    что такое filesystem.                                                                                                 
+    Layer 4 — Parser Layer                                                                                                
+                                                                                                                      
+    FSM parser:                                                                                                           
+                                                                                                                      
+    собирает packet;                                                                                                      
+    проверяет CRC;                                                                                                        
+    выдает готовый frame.                                                                                                 
+    Parser не знает application logic                                                                                     
+                                                                                                                      
+    Это очень важно.                                                                                                      
+                                                                                                                      
+    Layer 5 — Dispatcher Layer                                                                                            
+                                                                                                                      
+    Вот тут начинается routing.                                                                                           
+                                                                                                                      
+    Например:                                                                                                             
+                                                                                                                      
+    | CMD | Handler |                                                                                                     
+    |---|                                                                                                                 
+    | LOG_DATA | LoggerService |                                                                                          
+    | CONFIG_SET | ConfigService |                                                                                        
+    | SENSOR_READ | SensorService |                                                                                       
+                                                                                                                      
+    Dispatcher не знает UART                                                                                              
+                                                                                                                      
+    И это ключевой момент.                                                                                                
+                                                                                                                      
+    Layer 6 — Service Layer                                                                                               
+                                                                                                                      
+    Только business logic.                                                                                                
+                                                                                                                      
+    Например                                                                                                              
+    Logger Service                                                                                                        
+                                                                                                                      
+    Знает:                                                                                                                
+                                                                                                                      
+    flash;                                                                                                                
+    records;                                                                                                              
+    storage.                                                                                                              
+    Но не знает:                                                                                                          
+    FEND;                                                                                                                 
+    UART;                                                                                                                 
+    escaping;                                                                                                             
+    DMA.                                                                                                                  
+    Почему это очень важно                                                                                                
+    1. Можно менять transport без изменения services                                                                      
+                                                                                                                      
+    Например:                                                                                                             
+                                                                                                                      
+    Сегодня:                                                                                                              
+                                                                                                                      
+    UART                                                                                                                  
+                                                                                                                      
+    Завтра:                                                                                                               
+                                                                                                                      
+    USB CDC                                                                                                               
+                                                                                                                      
+    Services вообще не меняются.                                                                                          
+                                                                                                                      
+    2. Можно менять parser отдельно                                                                                       
+                                                                                                                      
+    Например:                                                                                                             
+                                                                                                                      
+    оптимизировать FSM;                                                                                                   
+    заменить DMA;                                                                                                         
+    добавить zero-copy.                                                                                                   
+                                                                                                                      
+    Application не ломается.                                                                                              
+                                                                                                                      
+    3. Можно тестировать независимо                                                                                       
+    Например                                                                                                              
+    Unit test parser                                                                                                      
+                                                                                                                      
+    Подал stream:                                                                                                         
+                                                                                                                      
+    C0 01 02 ...                                                                                                          
+                                                                                                                      
+    Проверил:                                                                                                             
+                                                                                                                      
+    packet parsed                                                                                                         
+    Без UART вообще                                                                                                       
+    Или тестировать services отдельно                                                                                     
+                                                                                                                      
+    Подал packet:                                                                                                         
+                                                                                                                      
+    CMD=LOG_READ                                                                                                          
+                                                                                                                      
+    Проверил:                                                                                                             
+                                                                                                                      
+    correct response                                                                                                      
+    4. Можно расширять систему                                                                                            
+                                                                                                                      
+    Например добавить:                                                                                                    
+                                                                                                                      
+    Новый сервис                                                                                                          
+    OTA                                                                                                                   
+    shell                                                                                                                 
+    streaming                                                                                                             
+    diagnostics                                                                                                           
+                                                                                                                      
+    не ломая parser.                                                                                                      
+                                                                                                                      
+    5. Это идеально подходит под expansion architecture                                                                   
+                                                                                                                      
+    У тебя уже modular hardware:                                                                                          
+                                                                                                                      
+    Controller Platform;                                                                                                  
+    Expansion Modules.                                                                                                    
+                                                                                                                      
+    LTP повторяет эту идеологию в software.                                                                               
+                                                                                                                      
+    Это очень правильный engineering подход                                                                               
+    По сути LTP становится не "протоколом"                                                                                
+                                                                                                                      
+    а:                                                                                                                    
+                                                                                                                      
+    transport subsystem                                                                                                   
+    Это ближе к архитектурам                                                                                              
+    Система                                                                                                               
+    USB stack                                                                                                             
+    BLE stack                                                                                                             
+    TCP/IP stack                                                                                                          
+    CANopen                                                                                                               
+    Modbus stack                                                                                                          
+    Главное отличие от старого WAKE                                                                                       
+                                                                                                                      
+    WAKE был:                                                                                                             
+                                                                                                                      
+    packet protocol                                                                                                       
+    LTP становится:                                                                                                       
+    modular transport architecture                                                                                        
+    Для LogLSM это особенно важно                                                                                         
+                                                                                                                      
+    Потому что у тебя:                                                                                                    
+                                                                                                                      
+    expansion ecosystem;                                                                                                  
+    variants;                                                                                                             
+    telemetry;                                                                                                            
+    low power;                                                                                                            
+    service modes;                                                                                                        
+    future scalability.                                                                                                   
+                                                                                                                      
+    И layered architecture позволяет всему этому расти без превращения firmware в монолит.                                

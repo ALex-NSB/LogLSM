@@ -1,0 +1,35 @@
+# === Qt / CMake (LOGLSMW) ===
+build*/
+CMakeLists.txt.user*
+.qtcreator/
+
+# === STM32CubeIDE / Eclipse (Firmware) ===
+Debug/
+Release/
+.settings/
+.metadata/
+*.launch
+
+# === объектные и промежуточные файлы ===
+*.o
+*.obj
+*.elf
+*.map
+*.list
+*.su
+
+# === Node.js (Scripts/build_tz.js) ===
+node_modules/
+
+# === IDE ===
+.vs/
+.vscode/
+
+# === ОС и редакторы ===
+*.lnk
+~$*
+Thumbs.db
+.DS_Store
+*~
+*.bak
+*.swp

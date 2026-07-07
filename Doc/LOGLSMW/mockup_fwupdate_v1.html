@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>LOGLSMW — обновление прошивки по LTP (эскиз v1)</title>
+<style>
+  body { font-family:"Segoe UI",Arial,sans-serif; background:#ECEAE4; margin:0; padding:24px 8px; }
+  .note { font-size:12px; color:#888; max-width:560px; margin:0 auto 8px; }
+  .note b { color:#C03030; }
+  .dlg  { width:560px; max-width:100%; background:#fff; border:1px solid #C8C6C0; border-radius:8px;
+          overflow:hidden; font-size:13px; color:#222; box-shadow:0 2px 12px rgba(0,0,0,.12);
+          margin:0 auto 8px; box-sizing:border-box; }
+  .head { padding:10px 14px; border-bottom:1px solid #E4E2DC; font-weight:600; }
+  .body { padding:14px; display:flex; flex-direction:column; gap:12px; }
+  .lbl  { font-size:11px; color:#666; } .dim{ color:#999; }
+  .mono { font-family:Consolas,monospace; }
+  .grn  { color:#1D7A4C; } .red{ color:#C03030; } .blue{ color:#2F6FB0; } .amber{ color:#B8860B; }
+  button { font-size:13px; padding:6px 12px; border:1px solid #C8C6C0; border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover { background:#F5F4F0; }
+  button:disabled { color:#AAA; background:#F5F4F0; cursor:default; }
+  .go   { border:1px solid #2F6FB0; color:#2F6FB0; font-weight:600; }
+  .filebox { display:flex; gap:8px; align-items:center; }
+  .filebox input { flex:1; font-size:13px; padding:5px 8px; border:1px solid #C8C6C0; border-radius:6px; }
+  .grid { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; font-size:12px; }
+  .grid .k { color:#999; } .grid .v { font-family:Consolas,monospace; font-weight:600; }
+  .steps{ display:flex; flex-direction:column; gap:5px; }
+  .step { display:flex; align-items:center; gap:8px; font-size:12px; }
+  .dot  { width:16px; height:16px; border-radius:50%; border:2px solid #C8C6C0; flex:none;
+          display:flex; align-items:center; justify-content:center; font-size:10px; color:#fff; }
+  .done .dot { background:#1D7A4C; border-color:#1D7A4C; }
+  .act  .dot { background:#E0A020; border-color:#E0A020; }
+  .act  { font-weight:600; }
+  .bar  { height:14px; background:#EAE8E2; border-radius:4px; overflow:hidden; }
+  .bar > div { height:100%; width:0%; background:#2F6FB0; border-radius:4px; transition:width .2s; }
+  .warn { background:#FBF3E2; border:1px solid #E8D49A; border-radius:6px; padding:8px 10px;
+          font-size:12px; color:#8A6A1E; }
+  .foot { display:flex; gap:8px; justify-content:flex-end; padding:10px 14px; border-top:1px solid #E4E2DC; }
+</style>
+</head>
+<body>
+
+<div class="note"><b>эскиз v1</b> · LOGLSMW — обновление прошивки по LTP (16.06.2026).
+Полевое обновление через сервисный кабель UART (без ST-Link). BOOT0=0 (мгновенный старт),
+поэтому свой LTP-загрузчик. Диалог инженерного режима. Прогресс — демо.</div>
+
+<div class="dlg">
+  <div class="head">Обновление прошивки регистратора</div>
+  <div class="body">
+
+    <!-- выбор файла -->
+    <div>
+      <div class="lbl" style="margin-bottom:4px;">Файл прошивки (.bin / .hex)</div>
+      <div class="filebox">
+        <input class="mono" value="LOGLSMA_v1.3.bin" readonly>
+        <button>Обзор…</button>
+      </div>
+    </div>
+
+    <!-- сверка образа с устройством -->
+    <div class="grid">
+      <span class="k">Текущая версия</span><span class="v">v1.2  (LOGLSMA · 0x6C)</span>
+      <span class="k">Новая версия</span><span class="v blue">v1.3</span>
+      <span class="k">Размер образа</span><span class="v">48.9 КБ</span>
+      <span class="k">CRC32 образа</span><span class="v">0x9A3C71E8</span>
+      <span class="k">Совместимость</span><span class="v grn">✓ вариант A (LSM6DSO)</span>
+    </div>
+
+    <div class="warn">⚠ Во время обновления не отключайте кабель и питание.
+      При обрыве загрузчик сохраняется — повторите обновление.</div>
+
+    <!-- шаги -->
+    <div class="steps" id="steps">
+      <div class="step" data-i="0"><span class="dot"></span>Вход в загрузчик (команда LTP)</div>
+      <div class="step" data-i="1"><span class="dot"></span>Стирание области приложения</div>
+      <div class="step" data-i="2"><span class="dot"></span>Передача образа блоками</div>
+      <div class="step" data-i="3"><span class="dot"></span>Проверка CRC</div>
+      <div class="step" data-i="4"><span class="dot"></span>Перезапуск в приложение</div>
+    </div>
+
+    <!-- прогресс -->
+    <div class="bar"><div id="pb"></div></div>
+    <div style="display:flex; justify-content:space-between;">
+      <span class="lbl mono" id="pct">0 %</span>
+      <span class="lbl mono" id="rate"></span>
+    </div>
+
+  </div>
+  <div class="foot">
+    <button id="btnGo" class="go" onclick="start()">Обновить</button>
+    <button onclick="reset()">Отмена</button>
+  </div>
+</div>
+
+<div class="note">Firmware-разметка (мгновенный старт): [приложение первым] — на сбросе сразу
+стартует приложение; в загрузчик переходим ТОЛЬКО по команде обновления (флаг + переход),
+сам загрузчик в защищённой области, себя не стирает. Команды LTP: enter_bootloader,
+flash_block(addr,data), verify_crc, run_app. Передача — как дамп Flash наоборот.</div>
+
+<script>
+const steps=[...document.querySelectorAll('.step')];
+let timer=null;
+function paint(active,doneTo){
+  steps.forEach((s,i)=>{ s.classList.toggle('done',i<=doneTo);
+    s.classList.toggle('act',i===active);
+    s.querySelector('.dot').textContent = i<=doneTo?'✓':''; });
+}
+function reset(){ if(timer)clearInterval(timer); timer=null;
+  paint(-1,-1); document.getElementById('pb').style.width='0%';
+  document.getElementById('pct').textContent='0 %'; document.getElementById('rate').textContent='';
+  document.getElementById('btnGo').disabled=false; }
+function start(){
+  document.getElementById('btnGo').disabled=true;
+  let p=0; reset(); document.getElementById('btnGo').disabled=true;
+  timer=setInterval(()=>{
+    p+=2;
+    const st = p<8?0 : p<20?1 : p<88?2 : p<96?3 : 4;
+    paint(st, st-1+(p>=98?1:0));
+    document.getElementById('pb').style.width=Math.min(100,p)+'%';
+    document.getElementById('pct').textContent=Math.min(100,p)+' %';
+    if(st===2) document.getElementById('rate').textContent='8.4 КБ/с · ETA 00:04';
+    else document.getElementById('rate').textContent='';
+    if(p>=100){ clearInterval(timer); timer=null; paint(4,4);
+      document.getElementById('rate').innerHTML='<span class="grn">готово — прошивка v1.3</span>'; }
+  },90);
+}
+paint(-1,-1);
+</script>
+</body>
+</html>

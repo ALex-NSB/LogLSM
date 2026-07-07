@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>LOGLSMW — вкладка «Тест памяти» (эскиз v1)</title>
+<style>
+  body { font-family:"Segoe UI",Arial,sans-serif; background:#ECEAE4; margin:0; padding:24px 8px; }
+  .note { font-size:12px; color:#888; max-width:880px; margin:0 auto 8px; }
+  .note b { color:#C03030; }
+  .win  { width:880px; max-width:100%; background:#fff; border:1px solid #C8C6C0; border-radius:8px;
+          overflow:hidden; font-size:13px; color:#222; box-shadow:0 2px 8px rgba(0,0,0,.08);
+          margin:0 auto 8px; box-sizing:border-box; }
+  .tabs { display:flex; padding:0 12px; border-bottom:1px solid #E4E2DC; }
+  .tabs span { padding:6px 13px; color:#777; font-size:12px; border-bottom:2px solid transparent; }
+  .tabs .act { color:#222; font-weight:600; border-bottom:2px solid #2F6FB0; }
+  .body { padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .row  { display:flex; gap:10px; }
+  .card { border:1px solid #E4E2DC; border-radius:8px; padding:10px 12px; background:#fff; }
+  .ttl  { font-size:11px; font-weight:600; color:#777; margin-bottom:8px; }
+  .lbl  { font-size:11px; color:#666; }
+  .dim  { color:#999; }
+  .mono { font-family:Consolas,monospace; }
+  .grn  { color:#1D7A4C; } .red { color:#C03030; } .blue{ color:#2F6FB0; }
+  button { font-size:13px; padding:6px 10px; border:1px solid #C8C6C0; border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover { background:#F5F4F0; }
+  .start{ border:1px solid #1D7A4C; color:#1D7A4C; }
+  .stop { border:1px solid #C03030; color:#C03030; }
+  .warn { border:1px solid #C0892F; color:#9A6A1E; }
+  input,select { font-size:13px; padding:3px 7px; border:1px solid #C8C6C0; border-radius:6px; background:#fff; }
+  .field{ display:flex; justify-content:space-between; align-items:center; margin:5px 0; }
+  .field input{ width:72px; text-align:right; }
+  .bar  { height:12px; background:#EAE8E2; border-radius:3px; overflow:hidden; margin:6px 0; }
+  .bar > div { height:100%; background:#1D7A4C; border-radius:3px; }
+  .out  { font-family:Consolas,monospace; font-size:11px; color:#444; background:#FAFAF8;
+          border:1px solid #E4E2DC; border-radius:6px; padding:8px; height:150px; overflow:auto; line-height:1.5; }
+  .chk  { display:flex; gap:14px; align-items:center; margin:6px 0; }
+  .chk label{ display:flex; gap:4px; align-items:center; font-size:12px; }
+</style>
+</head>
+<body>
+
+<div class="note"><b>эскиз v1</b> · LOGLSMW — инженерная вкладка «Тест памяти» (16.06.2026).
+Стресс-тест Flash P25Q128 / FRAM / EEPROM: запись тестового шаблона → чтение → сверка
+(FindDiff) → отчёт по ошибкам и циклам. Прообраз — вкладка «Тест памяти» программы RVZD.</div>
+
+<div class="win">
+
+  <div class="tabs">
+    <span>Дашборд</span><span>Команды</span><span>Мониторинг</span>
+    <span class="act">Тест памяти</span><span>Стенд</span><span>Лог</span><span>Настройки</span>
+  </div>
+
+  <div class="body">
+
+    <div class="lbl dim" style="margin:-2px 0 2px;">
+      Квалификационный тест: запись шаблона → чтение → сверка, циклы, температурный
+      прогон — усиленная проверка новой партии микросхем или нового типа памяти.
+      (Рутинное стирание+проверка при инициализации — на Дашборде, в активации.)</div>
+
+    <!-- Цель + управление -->
+    <div class="row" style="align-items:center;">
+      <span class="lbl">Память:</span>
+      <select style="width:220px;">
+        <option>Flash P25Q128 (16 МБ NOR)</option>
+        <option>FRAM FM25xx (опционально)</option>
+      </select>
+      <button class="start" onclick="run()">▶ Старт</button>
+      <button class="stop" onclick="stop()">■ Стоп</button>
+      <div style="flex:1;" class="bar"><div id="pb" style="width:0%"></div></div>
+      <span class="lbl mono" id="pbtxt">0 %</span>
+    </div>
+
+    <div class="row">
+
+      <!-- Параметры теста -->
+      <div class="card" style="width:240px;">
+        <div class="ttl">Параметры записи/чтения</div>
+        <div class="field"><span class="lbl">Тестовый байт</span><input class="mono" value="0xA5"></div>
+        <div class="field"><span class="lbl">Страниц (диапазон)</span><input class="mono" value="1024"></div>
+        <div class="field"><span class="lbl">Старт-страница</span><input class="mono" value="0"></div>
+        <div class="field"><span class="lbl">Скорость SPI, МГц</span><input class="mono" value="40"></div>
+        <div class="field"><span class="lbl">Циклов</span><input class="mono" value="100"></div>
+        <div class="field"><span class="lbl">Сверка (verify)</span><input type="checkbox" checked></div>
+        <div style="display:flex; gap:6px; margin-top:8px;">
+          <button style="flex:1;">Запись</button>
+          <button style="flex:1;">Чтение</button>
+        </div>
+        <div style="display:flex; gap:6px; margin-top:6px;">
+          <button class="warn" style="flex:1;">Стереть стр.</button>
+          <button class="warn" style="flex:1;">Стереть чип</button>
+        </div>
+      </div>
+
+      <!-- Температурный прогон -->
+      <div class="card" style="width:200px;">
+        <div class="ttl">Температурный прогон</div>
+        <div class="chk">
+          <label><input type="checkbox" id="cTMP" checked onclick="paint()">TMP</label>
+          <label><input type="checkbox" id="cLSM" checked onclick="paint()">LSM</label>
+          <label><input type="checkbox" id="cSTM" onclick="paint()">STM</label>
+        </div>
+        <!-- живые показания выбранных датчиков -->
+        <div id="tvals" style="border:1px solid #E4E2DC; border-radius:6px; padding:6px 8px; margin-bottom:8px;">
+          <div class="field" id="rTMP" style="margin:2px 0;"><span class="lbl">TMP</span><span class="mono" style="font-weight:600;">25.4 °C</span></div>
+          <div class="field" id="rLSM" style="margin:2px 0;"><span class="lbl">LSM</span><span class="mono" style="font-weight:600;">25.1 °C</span></div>
+          <div class="field" id="rSTM" style="margin:2px 0;"><span class="lbl">STM</span><span class="mono" style="font-weight:600;">26.0 °C</span></div>
+        </div>
+        <div class="field"><span class="lbl">Макс t, °C</span><input class="mono" value="85"></div>
+        <div class="field"><span class="lbl">Мин t, °C</span><input class="mono" value="-20"></div>
+        <div class="field"><span class="lbl">Шаг t, °C</span><input class="mono" value="5"></div>
+        <div class="lbl dim" style="margin-top:8px;">Память тестируется на каждой ступени
+          температуры; t пишется в отчёт (выявление сбоев на краях диапазона).</div>
+        <label class="lbl" style="display:flex; gap:5px; margin-top:8px;">
+          <input type="checkbox">Откл. вывод (быстрее)</label>
+      </div>
+
+      <!-- Отчёт -->
+      <div class="card" style="flex:1; display:flex; flex-direction:column;">
+        <div style="display:flex; justify-content:space-between;">
+          <div class="ttl" style="margin:0;">Отчёт</div>
+          <div class="lbl mono">ошибок: <span class="red" id="errc">0</span> ·
+               цикл: <span id="cyc">0</span>/100</div>
+        </div>
+        <div class="out" id="out">
+          <div class="dim">ожидание запуска…</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Индивидуальная информация устройства (внутр. Flash STM32) -->
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="ttl" style="margin:0;">Индивидуальная информация устройства
+          <span class="lbl dim">(внутр. Flash STM32 · паспорт)</span></div>
+        <div style="display:flex; gap:6px;">
+          <button>Прочитать</button>
+          <button class="start">Записать</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px; gap:16px; flex-wrap:wrap;">
+        <div class="field" style="gap:8px;"><span class="lbl">Серийный №</span><input class="mono" value="LSMA-0007" style="width:110px"></div>
+        <div class="field" style="gap:8px;"><span class="lbl">Вариант</span>
+          <select><option>A (LSM6DSO)</option><option>B (LSM6DSV320X)</option></select></div>
+        <div class="field" style="gap:8px;"><span class="lbl">Дата выпуска</span><input class="mono" value="2026-06-16" style="width:100px"></div>
+        <div class="field" style="gap:8px;"><span class="lbl">Калибровка t, °C</span><input class="mono" value="+0.0" style="width:60px"></div>
+      </div>
+      <div class="lbl dim" style="margin-top:4px;">Обычное чтение/правка — не стресс-тест.
+        Прочитать текущие значения, при необходимости скорректировать и записать.</div>
+    </div>
+
+  </div>
+</div>
+
+<div class="note">Логика (из RVZD): WritePages → ReadMemory → FindDiff (сверка), WritePageReport
+по расхождениям; ErasePage/ChipErase; TestTemp(max,min,step) — прогон по температуре.
+Команды LTP к регистратору: FlashOn/Off, WriteMemory, ReadMemory, ErasePage, ChipErase, IsFlashBusy.
+Температурный прогон: все 3 датчика разом (галками можно отключить лишние) — в отчёт пишутся все включённые.</div>
+
+<script>
+function paint(){
+  document.getElementById('rTMP').style.display = document.getElementById('cTMP').checked ? 'flex':'none';
+  document.getElementById('rLSM').style.display = document.getElementById('cLSM').checked ? 'flex':'none';
+  document.getElementById('rSTM').style.display = document.getElementById('cSTM').checked ? 'flex':'none';
+}
+paint();
+setInterval(()=>{                       // лёгкая имитация живых показаний
+  const set=(id,base)=>{ const el=document.querySelector('#'+id+' .mono');
+    if(el) el.textContent=(base+(Math.random()-0.5)*0.6).toFixed(1)+' °C'; };
+  set('rTMP',25.4); set('rLSM',25.1); set('rSTM',26.0);
+},1500);
+let timer=null, page=0, cyc=0, errs=0;
+const out=document.getElementById('out');
+function line(html){ const d=document.createElement('div'); d.innerHTML=html; out.appendChild(d); out.scrollTop=out.scrollHeight; }
+function run(){
+  if(timer) return; page=0; cyc=0; errs=0; out.innerHTML='';
+  line('<span class="blue">[старт] Flash P25Q128, байт 0xA5, 1024 стр., verify ON</span>');
+  timer=setInterval(step,250);
+}
+function stop(){ if(timer){clearInterval(timer);timer=null; line('<span class="dim">[стоп]</span>');} }
+function step(){
+  page+=64;
+  const pct=Math.min(100,Math.round(page/1024*100));
+  document.getElementById('pb').style.width=pct+'%';
+  document.getElementById('pbtxt').textContent=pct+' %';
+  if(Math.random()<0.04){ errs++; document.getElementById('errc').textContent=errs;
+    line('<span class="red">стр.'+page+': расхождение @0x'+(page*256+17).toString(16)+' зап 0xA5 / чит 0xA1</span>'); }
+  if(page>=1024){
+    cyc++; document.getElementById('cyc').textContent=cyc; page=0;
+    line('<span class="grn">цикл '+cyc+' завершён · 1024 стр · ошибок '+errs+'</span>');
+    if(cyc>=100){ stop(); line('<span class="blue">[готово] 100 циклов, всего ошибок '+errs+'</span>'); }
+  }
+}
+</script>
+</body>
+</html>

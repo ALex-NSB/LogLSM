@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>LOGLSMW — вкладка «Стенд» (эскиз v1)</title>
+<style>
+  body { font-family:"Segoe UI",Arial,sans-serif; background:#ECEAE4; margin:0; padding:24px 8px; }
+  .note { font-size:12px; color:#888; max-width:860px; margin:0 auto 8px; }
+  .note b { color:#C03030; }
+  .win  { width:860px; max-width:100%; background:#fff; border:1px solid #C8C6C0; border-radius:8px;
+          overflow:hidden; font-size:13px; color:#222; box-shadow:0 2px 8px rgba(0,0,0,.08);
+          margin:0 auto 8px; box-sizing:border-box; }
+  .tabs { display:flex; gap:0; padding:0 12px; border-bottom:1px solid #E4E2DC; }
+  .tabs span { padding:6px 14px; color:#777; font-size:12px; border-bottom:2px solid transparent; }
+  .tabs .act { color:#222; font-weight:600; border-bottom:2px solid #2F6FB0; }
+  .body { padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .row  { display:flex; gap:10px; }
+  .card { border:1px solid #E4E2DC; border-radius:8px; padding:10px 12px; background:#fff; }
+  .ttl  { font-size:11px; font-weight:600; color:#777; margin-bottom:8px; }
+  .lbl  { font-size:11px; color:#666; }
+  .mono { font-family:Consolas,monospace; }
+  .blue { color:#2F6FB0; } .red { color:#C03030; } .grn { color:#1D7A4C; } .amber{ color:#B8860B; }
+  button { font-size:13px; padding:6px 12px; border:1px solid #C8C6C0; border-radius:6px;
+           background:#fff; cursor:pointer; }
+  button:hover { background:#F5F4F0; }
+  .big  { font:600 13px "Segoe UI"; }
+  .start{ border:1px solid #1D7A4C; color:#1D7A4C; }
+  .stop { border:1px solid #C03030; color:#C03030; }
+  input,select { font-size:13px; padding:4px 8px; border:1px solid #C8C6C0; border-radius:6px; background:#fff; }
+  .field{ display:flex; justify-content:space-between; align-items:center; margin:5px 0; }
+  .field input{ width:80px; text-align:right; }
+  .num  { font-family:Consolas,monospace; font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:right; color:#999; font-weight:600; font-size:10px; padding:3px 8px; border-bottom:1px solid #E4E2DC; }
+  th:first-child, td:first-child { text-align:left; }
+  td { padding:3px 8px; border-bottom:1px solid #F0EEE9; font-family:Consolas,monospace; }
+  .dim { color:#999; }
+</style>
+</head>
+<body>
+
+<div class="note"><b>эскиз v1</b> · LOGLSMW — инженерная вкладка «Стенд» (16.06.2026).
+Стенд = Nucleo (ADDR 0x8C) и регистратор (0x8D) на одной линии LTP. Главная идея ТЗ v2:
+единый журнал «<b style="color:#2F6FB0">задал</b> ↔ <b style="color:#C03030">измерил</b>».
+Числа на экране — демонстрационная анимация.</div>
+
+<div class="win">
+
+  <div class="tabs">
+    <span>Дашборд</span><span>Команды</span><span>Мониторинг</span>
+    <span>Flash</span><span>Лог</span><span class="act">Стенд</span><span>Настройки</span>
+  </div>
+
+  <div class="body">
+
+    <!-- ВЕРХ: управление мотором + живое сравнение -->
+    <div class="row">
+
+      <!-- Управление стендом: генератор циклограммы (MIN/MAX) -->
+      <div class="card" style="width:280px;">
+        <div class="ttl">Циклограмма испытания (0x8C)</div>
+        <table style="width:100%;">
+          <thead><tr><th></th><th>MIN</th><th>MAX</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="lbl">Время работы</td>
+                <td><input type="number" value="5" style="width:48px"></td>
+                <td><input type="number" value="30" style="width:48px"></td>
+                <td class="dim">с</td></tr>
+            <tr><td class="lbl">Время простоя</td>
+                <td><input type="number" value="5" style="width:48px"></td>
+                <td><input type="number" value="15" style="width:48px"></td>
+                <td class="dim">с</td></tr>
+            <tr><td class="lbl">Смен скорости/цикл</td>
+                <td><input type="number" value="1" style="width:48px"></td>
+                <td><input type="number" value="3" style="width:48px"></td>
+                <td class="dim">шт</td></tr>
+            <tr><td class="lbl">Скорость</td>
+                <td><input id="setMin" type="number" value="100" style="width:48px"></td>
+                <td><input id="setMax" type="number" value="600" style="width:48px"></td>
+                <td class="dim">об/м</td></tr>
+          </tbody>
+        </table>
+        <div class="field" style="margin-top:8px;">
+          <span class="lbl">Дробление шага</span>
+          <select><option>1</option><option>2</option><option>4</option>
+                  <option>8</option><option>16</option><option selected>32</option></select>
+        </div>
+        <div class="field">
+          <span class="lbl">Режим смены скорости</span>
+          <select id="mode"><option>Random ±</option><option>только +</option>
+                  <option>только −</option><option selected>+N</option></select>
+        </div>
+        <div class="field">
+          <span class="lbl">Число циклов N</span>
+          <input type="number" value="10" style="width:80px">
+        </div>
+        <div class="lbl dim" style="margin-top:2px;">
+          +N: пачка из N циклов с монотонно нарастающей скоростью (шаг =
+          (MAX−MIN) ÷ число смен) — поиск порога срабатывания по скорости.
+          Направление вращения — одно.</div>
+        <div style="display:flex; gap:8px; margin-top:10px;">
+          <button class="start" style="flex:1;" onclick="motor(true)">▶ Старт</button>
+          <button class="stop"  style="flex:1;" onclick="motor(false)">■ Стоп</button>
+        </div>
+        <div class="lbl dim" style="margin-top:6px;">Период импульсов = об/мин ÷ 60 × 200 × дробление</div>
+      </div>
+
+      <!-- Сравнение «задал ↔ измерил» -->
+      <div class="card" style="flex:1; display:flex; flex-direction:column;">
+        <div class="ttl">Скорость вращения — «задал ↔ измерил»</div>
+        <div style="display:flex; gap:10px;">
+          <div style="flex:1; text-align:center;">
+            <div class="lbl blue">Стенд задал</div>
+            <div class="mono blue" id="vSet" style="font-size:30px; font-weight:600;">600</div>
+            <div class="lbl">об/мин</div>
+          </div>
+          <div style="flex:1; text-align:center;">
+            <div class="lbl red">Регистратор измерил</div>
+            <div class="mono red" id="vMeas" style="font-size:30px; font-weight:600;">—</div>
+            <div class="lbl">об/мин (гироскоп)</div>
+          </div>
+          <div style="flex:1; text-align:center;">
+            <div class="lbl">Расхождение</div>
+            <div class="mono" id="vDiff" style="font-size:30px; font-weight:600;">—</div>
+            <div class="lbl">Δ, об/мин</div>
+          </div>
+        </div>
+        <svg width="100%" height="92" viewBox="0 0 520 92" preserveAspectRatio="none" style="margin-top:8px;">
+          <line x1="0" y1="91" x2="520" y2="91" stroke="#C8C6C0" stroke-width="1"/>
+          <polyline id="plSet"  fill="none" stroke="#2F6FB0" stroke-width="1.5" stroke-dasharray="4 3" points=""/>
+          <polyline id="plMeas" fill="none" stroke="#C03030" stroke-width="1.5" points=""/>
+        </svg>
+        <div style="display:flex; justify-content:space-between;">
+          <span class="lbl"><span class="blue">— — задал</span> &nbsp; <span class="red">—— измерил (гиро)</span></span>
+          <span class="lbl mono" id="status">стенд остановлен</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- НИЗ: единый журнал испытания «задал ↔ измерил» -->
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="ttl" style="margin:0;">Журнал испытания — единая шкала времени ПК</div>
+        <div style="display:flex; gap:8px;">
+          <button>Экспорт отчёта…</button>
+          <button>Очистить</button>
+        </div>
+      </div>
+      <table style="margin-top:8px;">
+        <thead><tr>
+          <th>Время ПК</th><th>Событие</th><th>Задал, об/мин</th>
+          <th>Измерил, об/мин</th><th>Δ</th><th>Макс гиро, dps</th><th>t, °C</th>
+        </tr></thead>
+        <tbody id="journal">
+          <tr><td>14:32:01</td><td>цикл 1 — старт</td><td>600</td><td>598</td><td class="grn">−2</td><td>3588</td><td>26.4</td></tr>
+          <tr><td>14:32:11</td><td>цикл 1 — стоп</td><td>0</td><td>4</td><td class="dim">—</td><td>—</td><td>27.1</td></tr>
+          <tr><td>14:32:16</td><td>цикл 2 — старт</td><td>600</td><td>601</td><td class="grn">+1</td><td>3606</td><td>27.3</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<div class="note">Открытые вопросы (ТЗ v2 §9, копилка): протокол Nucleo на LTP (адрес 0x8C)?
+единицы об/мин ↔ Гц импульсов? направление/рампа/профили; «измерил» = модуль гироскопа по оси
+вращения (об/мин = dps/6). Перспектива: GPS+PPS на стенде → калибровка RTC регистратора (SET_RTC_CAL).</div>
+
+<script>
+let on=false, t=0, set=600, holdTo=0;
+const ptsSet=[], ptsMeas=[];
+function motor(s){ on=s; holdTo=0; document.getElementById('status').textContent = s?'стенд работает':'стенд остановлен'; }
+function tick(){
+  // циклограмма: каждые несколько тиков — новая случайная скорость из [MIN,MAX]
+  if(on && t>=holdTo){
+    const lo=+document.getElementById('setMin').value||0, hi=+document.getElementById('setMax').value||0;
+    set = Math.round(lo + Math.random()*(hi-lo));
+    holdTo = t + 8 + Math.floor(Math.random()*8);
+  }
+  const target = on ? set : 0;
+  // имитация: измеренная скорость догоняет заданную с шумом
+  const prev = ptsMeas.length ? ptsMeas[ptsMeas.length-1].v : 0;
+  const meas = prev + (target-prev)*0.3 + (Math.random()-0.5)*8;
+  t++;
+  ptsSet.push({t, v:target}); ptsMeas.push({t, v:Math.max(0,meas)});
+  if(ptsSet.length>52){ptsSet.shift();ptsMeas.shift();}
+  document.getElementById('status').textContent =
+    on ? ('стенд работает · задано '+set+' об/мин') : 'стенд остановлен';
+  document.getElementById('vSet').textContent = on?set:0;
+  document.getElementById('vMeas').textContent = on?Math.round(meas):'—';
+  const d = on?Math.round(meas-set):null;
+  const el=document.getElementById('vDiff');
+  el.textContent = d===null?'—':(d>0?'+':'')+d;
+  el.className='mono '+(d===null?'':Math.abs(d)<=10?'grn':'amber');
+  const maxV=Math.max(700,...ptsSet.map(p=>p.v),...ptsMeas.map(p=>p.v));
+  const toPts=a=>a.map((p,i)=>`${i/51*520},${91-p.v/maxV*88}`).join(' ');
+  document.getElementById('plSet').setAttribute('points',toPts(ptsSet));
+  document.getElementById('plMeas').setAttribute('points',toPts(ptsMeas));
+}
+setInterval(tick,400);
+</script>
+</body>
+</html>

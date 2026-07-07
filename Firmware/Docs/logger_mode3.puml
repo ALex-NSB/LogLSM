@@ -1,0 +1,152 @@
+@startuml Logger_Mode3_StateMachine
+' ============================================================
+' Логгер LSM6DSV320X — Режим 3: Регистратор цикла вращения
+' Автомат состояний (State Machine Diagram)
+' Версия: 1.0  |  MCU: STM32L433CCT3
+' ============================================================
+
+skinparam StateBackgroundColor    #37474F
+skinparam StateBorderColor        #90A4AE
+skinparam StateFontColor          white
+skinparam StateFontSize           13
+skinparam StateFontStyle          bold
+skinparam StateArrowColor         #546E7A
+skinparam ArrowFontSize           11
+skinparam ArrowFontColor          #37474F
+skinparam BackgroundColor         #FAFAFA
+skinparam DefaultFontName         Arial
+skinparam NoteBackgroundColor     #FFF9C4
+skinparam NoteBorderColor         #F9A825
+skinparam NoteFontSize            11
+
+title Режим 3 — Регистратор цикла вращения\n(LSM6DSV320X + STM32L433, LS 14250)
+
+' ── НАЧАЛЬНОЕ СОСТОЯНИЕ ──
+[*] --> PASSIVE : Инициализация / START WORK
+
+' ══════════════════════════════════════════════════════════
+state PASSIVE #263238 {
+  PASSIVE : **Пассивное состояние**
+  PASSIVE : МК: Stop 2 (~2 мкА)
+  PASSIVE : RTC: активен, батарейка
+  PASSIVE : LSM6DSV: Low-Power
+  PASSIVE : Акселерометр: Wake-Up детектор
+  PASSIVE : Суммарный ток: ~20 мкА
+}
+
+note right of PASSIVE
+  CR2032 (225 мАч) / 20 мкА
+  ≈ **11 000 часов** автономно
+  = ~458 суток
+end note
+
+' ── WAKE-UP ──
+state WAKEUP #1565C0 {
+  WAKEUP : **WAKE-UP**
+  WAKEUP : Прерывание INT1 (EXTI)
+  WAKEUP : HAL выход из Stop 2
+  WAKEUP : SystemClock восстановление
+  WAKEUP : LSM6DSV инициализация
+}
+
+' ── ОПРЕДЕЛЕНИЕ СКОРОСТИ ──
+state SPEED_CHECK #6A1B9A {
+  SPEED_CHECK : **Определение скорости**
+  SPEED_CHECK : Читаем гироскоп X/Y/Z
+  SPEED_CHECK : Вычисляем |ω| (рад/с)
+  SPEED_CHECK : RPM = |ω| / (2π) × 60
+  SPEED_CHECK : Фильтрация N измерений
+}
+
+note right of SPEED_CHECK
+  Формула:
+  **RPM = |ω_rad/s| / 6.2832 × 60**
+  Ось вращения = ось с макс |ω|
+  Порог: настраивается SET THRESHOLD
+  По умолчанию: **10 об/мин**
+end note
+
+' ── РАБОЧИЙ ЦИКЛ ──
+state WORKING_CYCLE #1B5E20 {
+  WORKING_CYCLE : **Рабочий цикл**
+  WORKING_CYCLE : Фиксируем t_start (RTC Unix)
+  WORKING_CYCLE : Непрерывно: Акс. X/Y/Z
+  WORKING_CYCLE : Непрерывно: Гиро X/Y/Z
+  WORKING_CYCLE : Накапливаем MAX по каждой оси
+  WORKING_CYCLE : Контроль RPM каждые N изм.
+}
+
+note right of WORKING_CYCLE
+  Структура MAX в RAM:
+  max_ax, max_ay, max_az (int16 мг)
+  max_gx, max_gy, max_gz (int16 mdps)
+  t_start (uint32 Unix)
+end note
+
+' ── СОХРАНЕНИЕ ──
+state SAVING #E65100 {
+  SAVING : **Сохранение записи**
+  SAVING : Фиксируем t_end (RTC Unix)
+  SAVING : Формируем структуру 24 байт
+  SAVING : Вычисляем CRC-16
+  SAVING : Запись в Flash P25Q128H (SPI)
+  SAVING : Сброс MAX-аккумуляторов
+}
+
+note right of SAVING
+  Структура записи (24 байт):
+  ┌──────────────────────────┐
+  │ t_start   4 байт (Unix) │
+  │ t_end     4 байт (Unix) │
+  │ MAX Акс X 2 байт (int16)│
+  │ MAX Акс Y 2 байт (int16)│
+  │ MAX Акс Z 2 байт (int16)│
+  │ MAX Гиро X 2 байт       │
+  │ MAX Гиро Y 2 байт       │
+  │ MAX Гиро Z 2 байт       │
+  │ CRC-16    2 байт        │
+  └──────────────────────────┘
+  128 Мбит Flash → ~700 000 записей
+end note
+
+' ── СЕРВИСНЫЙ РЕЖИМ (внешний) ──
+state SERVICE_MODE #1565C0 {
+  SERVICE_MODE : **Сервисный режим**
+  SERVICE_MODE : USB подключён
+  SERVICE_MODE : Qt-программа управляет
+}
+
+' ════════════════════════════════
+' ПЕРЕХОДЫ
+' ════════════════════════════════
+
+PASSIVE      --> WAKEUP        : INT1 (EXTI)\n[WAKE-UP от LSM6DSV]
+
+WAKEUP       --> SPEED_CHECK   : Инициализация OK\n[WHO_AM_I == 0x70]
+
+WAKEUP       --> PASSIVE       : Инициализация FAIL\n[I2C ошибка / таймаут]
+
+SPEED_CHECK  --> WORKING_CYCLE : [RPM >= THRESHOLD]\n(по умолч. 10 об/мин)
+
+SPEED_CHECK  --> PASSIVE       : [RPM < THRESHOLD]\nЛожное пробуждение\nВозврат в Stop 2
+
+WORKING_CYCLE --> SAVING       : RPM < THRESHOLD\nза N измерений подряд\n[гистерезис остановки]
+
+WORKING_CYCLE --> SAVING       : Таймаут цикла\n[защита от зависания]
+
+SAVING       --> PASSIVE       : Запись OK\nСброс MAX\nВозврат в Stop 2
+
+SAVING       --> PASSIVE       : Flash заполнен\n[Флаг ошибки в FRAM]
+
+' ── Переход в сервисный режим из любого состояния ──
+PASSIVE       --> SERVICE_MODE : USB VBUS обнаружен\n[EXTI на VBUS]
+WAKEUP        --> SERVICE_MODE : USB VBUS\n[приоритет сервиса]
+WORKING_CYCLE --> SERVICE_MODE : USB VBUS\n[прерывание цикла,\nзапись частичная]
+SAVING        --> SERVICE_MODE : USB VBUS\n[запись завершить]
+
+SERVICE_MODE  --> PASSIVE      : START WORK\n[USB отключён]
+
+' ── Конец при переполнении Flash ──
+SAVING        --> [*]          : Flash полон\nАвтономная работа\nзавершена
+
+@enduml

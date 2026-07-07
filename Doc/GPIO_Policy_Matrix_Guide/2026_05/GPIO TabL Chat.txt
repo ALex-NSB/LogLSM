@@ -1,0 +1,106 @@
+      GPIO State Profiles   
+      GPIO Policy Matrix
+
+
+Обновил шаблон для STM32L433CC:
+
+Теперь:
+
+все 48 выводов,
+добавлена первая колонка Pin Number,
+строки можно свободно сортировать и группировать,
+удобно разделять:
+базовый функционал,
+module pins,
+wakeup pins,
+reserved pins.
+
+Скачать архив:
+
+
+
+
+ Signal Name это что                                                        
+                                                                           
+          Signal Name — это не имя вывода STM32, а имя сигнала внутри проекта LogLSM.
+                                                                           
+          То есть:                                                                   
+                                                                           
+          Pin Name                                                                   
+                                                                           
+          это:                                                                       
+                                                                           
+          PA0                                                                        
+          PB11                                                                       
+          PC13                                                                       
+                                                                           
+          — физические выводы MCU.                                                   
+                                                                           
+          Signal Name                                                                
+                                                                           
+          это:                                                                       
+                                                                           
+          IMU_INT1                                                                   
+          FLASH_CS                                                                   
+          SERVICE_DETECT                                                             
+          UART_DEBUG_TX                                                              
+                                                                           
+          — логические сигналы проекта.                                              
+                                                                           
+          Зачем это нужно                                                            
+                                                                           
+          Потому что:                                                                
+                                                                           
+          один и тот же pin может менять функцию,                                    
+          а signal name отражает инженерный смысл.                                   
+          Пример                                                                     
+          Pin Name		Signal Name			Peripheral                                           
+          PA0					IMU_INT1				EXTI0                                                        
+          PB11				FLASH_CS				QSPI                                                       
+          PC13				SERVICE_DETECT	GPIO                                                 
+          Почему это очень важно                                                     
+                                                                           
+          Потому что firmware потом работает именно с signal names.                  
+                                                                           
+          Например:                                                                  
+                                                                           
+          imu_int1_handler()                                                         
+          flash_cs_low()                                                             
+          service_detect_read()                                                      
+                                                                           
+          а не:                                                                      
+                                                                           
+          pa0_handler()                                                              
+          pb11_low()                                                                 
+          Это разделяет                                                              
+          Hardware level                                                             
+          PA0                                                                        
+                                                                           
+          и                                                                          
+                                                                           
+          System architecture level                                                  
+          IMU_INT1                                                                   
+          Особенно полезно для твоего проекта                                        
+                                                                           
+          Потому что:                                                                
+                                                                           
+          module mappings могут меняться,                                            
+          pin routing может меняться,                                                
+          controller variants могут отличаться,                                      
+                                                                           
+          но:                                                                        
+                                                                           
+          signal meaning remains stable                                              
+          Пример для модулей                                                         
+          Controller A                                                               
+          Pin	Signal                                                                 
+          PB10	MODULE_UART_TX                                                       
+          Controller B                                                               
+          Pin	Signal                                                                 
+          PC6	MODULE_UART_TX                                                         
+                                                                           
+          Firmware всё равно использует:                                             
+                                                                           
+          MODULE_UART_TX                                                             
+                                                                           
+          Это и есть правильная abstraction layer.                                   

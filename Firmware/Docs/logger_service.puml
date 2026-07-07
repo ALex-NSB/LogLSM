@@ -1,0 +1,142 @@
+@startuml Logger_Service_Mode
+' ============================================================
+' Логгер LSM6DSV320X — Сервисный режим (USB CDC + Qt)
+' Диаграмма последовательности команд
+' Версия: 1.0
+' ============================================================
+
+skinparam ActivityBackgroundColor #37474F
+skinparam ActivityBorderColor     #90A4AE
+skinparam ActivityFontColor       white
+skinparam ActivityFontSize        12
+skinparam ActivityArrowColor      #546E7A
+skinparam ArrowFontSize           11
+skinparam ArrowFontColor          #37474F
+skinparam DiamondBackgroundColor  #1565C0
+skinparam DiamondBorderColor      #0D47A1
+skinparam DiamondFontColor        white
+skinparam BackgroundColor         #FAFAFA
+skinparam NoteBackgroundColor     #E3F2FD
+skinparam NoteBorderColor         #1976D2
+skinparam DefaultFontName         Arial
+
+title Логгер — Сервисный режим\n(USB CDC VCP + Qt 6.5 LTS)
+
+start
+
+#1565C0 :Обнаружение **USB VBUS**\n(EXTI прерывание на VBUS pin);
+
+#1565C0 :Инициализация **USB FS PCD**\nМКи переходит в полную тактовую\n(16 МГц → активный режим);
+
+#1976D2 :USB Enumeration\nВиртуальный COM-порт CDC;
+
+note right
+  ПК видит устройство как
+  **COMxx (USB Serial Device)**
+  Qt подключается по QSerialPort
+end note
+
+#1976D2 :Автоматически отправить **INFO**:
+----
+Firmware: v1.0
+Sensor: LSM6DSV320X OK (0x70)
+Flash: P25Q128H 16MB
+Flash used: xxx KB (xx%)
+Mode: [1/2/3]
+ODR: xxx Hz
+FS_XL: ±XXg  FS_G: ±XXXXdps
+Threshold: XX RPM
+RTC: YYYY-MM-DD HH:MM:SS;
+
+repeat
+
+  #1976D2 :Ожидание команды от Qt\n(CDC RX буфер);
+
+  switch (Принятая команда?)
+
+    case (INFO)
+      #0277BD :Повторная отправка информации\nо состоянии устройства;
+
+    case (READ LOG)
+      #0277BD :Чтение Flash P25Q128H\nот начала до текущего указателя;
+      #0277BD :Передача данных по CDC:\nЗаголовок + бинарные записи;
+
+      note right
+        Формат передачи (бинарный):
+        [HEADER 16 байт]
+        [RECORD × N байт]
+        [EOF маркер 4 байт]
+        ──────────────────
+        Режим 1/2: 12-14 байт/фрейм
+        Режим 3: 24 байт/запись
+      end note
+
+      #0277BD :Отправить подтверждение\n"READ OK: N записей";
+
+    case (ERASE LOG)
+      #B71C1C :Стирание секторов Flash\nP25Q128H (по 4 КБ);
+      #B71C1C :Сброс указателей записи\nв FRAM FM25V10A-G;
+      #B71C1C :Отправить "ERASE OK";
+
+    case (SET MODE [1/2/3])
+      #00695C :Проверка параметра [1..3];
+      if (Параметр корректен?) then (ДА)
+        #00695C :Сохранить режим в **FRAM**\n(конфигурационный блок);
+        #00695C :Ответ: "SET MODE OK: [N]";
+      else (НЕТ)
+        #C62828 :Ответ: "ERROR: INVALID MODE";
+      endif
+
+    case (SET ODR [Гц])
+      #00696C :Допустимые значения:\n12.5 / 26 / 52 / 104 / 208 /\n416 / 833 / 1666 Гц;
+      if (ODR в допустимом диапазоне?) then (ДА)
+        #00696C :Сохранить ODR в **FRAM**;
+        #00696C :Ответ: "SET ODR OK: XXX Hz";
+      else (НЕТ)
+        #C62828 :Ответ: "ERROR: INVALID ODR";
+      endif
+
+    case (SET FS_XL / SET FS_G)
+      #00838F :FS_XL: ±2 / ±4 / ±8 / ±16g\n(LSM6DSV — до ±320g в режиме HG);
+      #00838F :FS_G: ±125 / ±250 / ±500 /\n±1000 / ±2000 / ±4000 dps;
+      #00838F :Сохранить в **FRAM**\nОтвет: "SET FS OK";
+
+    case (SET THRESHOLD [об/мин])
+      #006064 :Установить порог скорости\nвращения для Режима 3\n(по умолчанию 10 об/мин);
+      #006064 :Сохранить в **FRAM**\nОтвет: "SET THRESHOLD OK: XX";
+
+    case (UPDATE FSM)
+      #6A1B9A :Приём бинарного файла FSM\nот Qt (Unico-GUI формат);
+      #6A1B9A :Запись программы FSM\nв датчик **LSM6DSV320X** через I2C\n(регистры 0x60..0x7F + конфиг);
+      if (FSM загружена OK?) then (ДА)
+        #6A1B9A :Ответ: "FSM OK";
+      else (НЕТ)
+        #C62828 :Ответ: "ERROR: FSM FAILED";
+      endif
+
+    case (GET RTC)
+      #455A64 :Читаем RTC\nФорматируем строку ISO 8601\nОтправляем Qt;
+
+    case (SET RTC [timestamp])
+      #455A64 :Устанавливаем RTC из Unix timestamp\nОтвет: "RTC OK";
+
+    case (START WORK)
+      #B71C1C :Проверить что режим задан;
+      if (Режим сохранён в FRAM?) then (ДА)
+        #B71C1C :Ответ: "START WORK OK"\nОтключить USB CDC\nПереход в **РАБОЧИЙ РЕЖИМ**;
+      else (НЕТ)
+        #C62828 :Ответ: "ERROR: MODE NOT SET"\nОстаться в сервисном режиме;
+      endif
+
+    case (Неизвестная команда)
+      #455A64 :Ответ: "ERROR: UNKNOWN CMD";
+
+  endswitch
+
+repeat while (USB подключён?) is (ДА) not (НЕТ — отключён / START WORK)
+
+#B71C1C :USB отключён\nDeInit USB PCD\nСохранить флаг перезапуска;
+
+stop
+
+@enduml

@@ -1,0 +1,131 @@
+# ninja log v5
+2260	2674	7920668348333860	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part4.pbi	c8a690b6ddee89c1
+821	1204	7920668333623074	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.pbi	ac2f4424c5d3c174
+1099	1468	7920668336264248	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.pbi	904bbb194d54e87b
+3068	4434	7920668365604844	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend.pbw	b46cf2fcbd4e3c82
+868	1250	7920668334081543	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.pbi	d5406ab35bfb2f37
+1494	1857	7920668340161198	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.pbi	3f66569991b23bfe
+670	797	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.xcl	5ba1d18ffec86ef3
+388	674	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/main.xcl	47615b83d1611f05
+1938	2295	7920668344536557	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.pbi	f2ecb75cf9865272
+35	415	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.xcl	6851563182b861f
+1503	1880	7920668340390441	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.pbi	cfdd69644baa827b
+2379	2752	7920668349111259	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part3.pbi	c97ee661378cf436
+1206	1377	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.xcl	c9c738c4e2e2a3e4
+681	1096	7920668332536716	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/main.pbi	442bfc34db3c3b18
+396	685	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.xcl	dd39817e990615db
+1220	1366	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.xcl	751ec9abe7a0f1dc
+1713	2111	7920668342692742	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.pbi	fbae7476ce87207b
+2114	2441	7920668346001663	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.pbi	68909ff958fea7e8
+1765	2171	7920668343290731	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.pbi	8d54c957bf4811c1
+1186	1329	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.xcl	a1f8f99e113445b5
+1372	1710	7920668338686138	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.pbi	4542e81060610baa
+23	358	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_it.xcl	7e18caa7d73d1990
+375	632	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/com.xcl	d2d6e9d919785546
+1080	1443	7920668336005106	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/StepDriver.pbi	41b26f69825befe2
+1883	2283	7920668344407001	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.pbi	e9700d0e8a7804f2
+6	444	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/StepDriver.xcl	2450dcf3206ccc3a
+1834	2229	7920668343878763	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.pbi	e707f41398e43612
+19	391	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_hal_msp.xcl	5ae1d612056655db
+361	664	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.xcl	f6b1dba19bae1a8d
+422	714	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.xcl	2ed8e9ef95fa1b71
+368	652	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/CMSIS/system_stm32l4xx.xcl	8d3c3c845f408bec
+46	364	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.xcl	28603214381c6db
+1807	2258	7920668344157832	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.pbi	ffdb45864eed0332
+40	371	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.xcl	b5cb743f7f301b86
+1285	1450	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.xcl	657fbce430382176
+1136	1279	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.xcl	85b124d1cd07ae7f
+2754	3065	7920668352247289	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend.pbd	400662295afe309d
+27	384	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/wake.xcl	cf5342a421cbaa5e
+1335	1488	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.xcl	3cbb31c0df9aa0f8
+1252	1651	7920668338098103	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part1.pbi	2940867ce40f1916
+626	749	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.xcl	959ea2ee00434910
+731	852	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.xcl	521594914e9fd09a
+692	814	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.xcl	71e7e74dec38c143
+386	534	7832314340000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Lib/wake.xcl	763d869fd11334d9
+659	784	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.xcl	3e8c0ef6128d882e
+721	843	7920668330000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.xcl	4e7adc83510154af
+1383	1762	7920668339204409	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.pbi	41b21ad3fd3fa666
+451	724	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.xcl	b2c6e5d06f0377c5
+790	1134	7920668332905474	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_it.pbi	abd75612dad5e3c8
+1470	1832	7920668339902068	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.pbi	c3220634e5dbb5c3
+638	1127	7920668332855651	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/com.pbi	766e28fedaa5ec3e
+859	1217	7920668333752642	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/CMSIS/system_stm32l4xx.pbi	49a36741d36c1d48
+2035	2377	7920668345363797	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.pbi	44dbc81788713e6a
+849	1183	7920668333413778	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_hal_msp.pbi	63ac4f1aaa08b14f
+1129	1501	7920668336593138	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.pbi	ccb92f8e315a35b4
+1456	1805	7920668339632976	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.pbi	b9c0e9ac7adb199a
+1445	1936	7920668340699400	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part0.pbi	8d335fff5d816fb8
+2443	2632	7920668347915259	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part5.pbi	b70ebd45690e0a1
+1655	2032	7920668341905372	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.pbi	dbc6cb2da2d467bb
+1613	1674	7832314354921052	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Lib/wake.pbi	2608a501c32acbf0
+1860	2323	7920668344815632	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Stend_part2.pbi	883c96eb7c9a2146
+31	621	7920668320000000	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/ring_buffer.xcl	33f86807f7957e2c
+756	1077	7920668332357315	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/ring_buffer.pbi	e4bd13c1c4d96f9a
+804	865	7920668330244379	D:/Work/950/950_40 Stend/Firmware/EWARM/Stend/BrowseInfo/Application/User/Core/wake.pbi	8e9a830c01068ed
+6	175	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/CMSIS/system_stm32l4xx.xcl	e41e8574c827f313
+9	186	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/wake.xcl	d410c4a6c591d574
+12	196	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.xcl	292427072d8a8a9d
+19	207	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_hal_msp.xcl	1bc48299fe2112c1
+16	217	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_it.xcl	db8e2ed3fc72bf1
+2	230	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/com.xcl	57e75f5500161909
+23	241	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/StepDriver.xcl	5842fe215726fb94
+28	253	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.xcl	ffffe37a953f674
+182	310	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.xcl	d138ff6d7410852
+192	342	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.xcl	b82f35fd39f77dc1
+214	382	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/main.xcl	3b26f0f9a0ec2fc8
+203	394	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.xcl	a34bc2e3178c1123
+225	406	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/ring_buffer.xcl	5bec6dc1a2806314
+237	417	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.xcl	c5487812df3ab649
+249	429	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.xcl	b3a35cd7616d7e47
+261	441	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.xcl	c0a43b3c66c0f239
+317	465	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.xcl	164bfc598d3128ba
+349	494	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.xcl	fb934222a5dfa722
+389	540	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.xcl	b516432e1684484d
+401	556	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.xcl	67e03a592cafd9b2
+413	568	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.xcl	32ad94f9653244c2
+437	595	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.xcl	238a743825075d07
+448	607	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.xcl	81a51eb773f9d68d
+425	618	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.xcl	902254b6c737ab6b
+472	629	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.xcl	d7d3a8a0c2539365
+563	640	8014626646617427	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/wake.pbi	31b69a873c0d4f22
+575	710	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.xcl	21f7988b4c78c80b
+502	905	8014626649318322	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_cortex.pbi	c70a8093a25970f0
+717	919	8014626640000000	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.xcl	97dba3581c5ecec1
+547	936	8014626649637252	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/main.pbi	3d4a9a131194be92
+614	995	8014626650225289	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/com.pbi	f5fc07783379fa31
+603	1002	8014626650225289	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_it.pbi	c0c3dc77cd4086aa
+625	1009	8014626650275105	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/ring_buffer.pbi	ce1a70f6ba2eae02
+643	1016	8014626650334906	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/CMSIS/system_stm32l4xx.pbi	952390c73d576f81
+636	1033	8014626650604011	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/stm32l4xx_hal_msp.pbi	e93ede555cc98c13
+908	1275	8014626653018665	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/StepDriver.pbi	a8d1a29b75e8d785
+926	1294	8014626653208022	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal.pbi	a5dc6307981542a8
+939	1340	8014626653676462	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma_ex.pbi	e06395364ede3939
+1005	1356	8014626653825963	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c_ex.pbi	ecad9613cdc635cb
+1012	1374	8014626654015331	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_i2c.pbi	2ebf4755d64fc142
+997	1385	8014626654124964	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_dma.pbi	71bc33bebb54618e
+1018	1392	8014626654184754	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ramfunc.pbi	29ed8e47da94b31d
+1036	1482	8014626655097622	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim.pbi	edd64ed6f74b5874
+1278	1645	8014626656722185	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr.pbi	9513024864618804
+1297	1693	8014626657197389	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_gpio.pbi	4c4987d89bc80ab
+1343	1728	8014626657556180	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_pwr_ex.pbi	6629af147cd4483c
+1359	1739	8014626657665835	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash_ex.pbi	ad030439372c2eb0
+1377	1773	8014626658004687	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc_ex.pbi	5dea2078d5432fc6
+1395	1781	8014626658004687	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_flash.pbi	137d5805939987ee
+1388	1800	8014626658283753	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_tim_ex.pbi	bcd802a76515ba9a
+1485	1858	8014626658851850	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_exti.pbi	a86f611c95968fde
+1648	2018	8014626660453026	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_rcc.pbi	5e45375c82b7e51b
+1731	2099	8014626661258500	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart_ex.pbi	f06e79a70af920ee
+1696	2113	8014626661397969	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Drivers/STM32L4xx_HAL_Driver/stm32l4xx_hal_uart.pbi	e2afcee0f3a3e4c1
+1742	2140	8014626661677036	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part1.pbi	1849223d71499b7e
+1776	2234	8014626662623870	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part3.pbi	75f164c6a56fcc93
+1784	2266	8014626662952770	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part0.pbi	bd9f9ea1f5fcf9b7
+1861	2315	8014626663431171	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part2.pbi	47b7145d7dcfde7a
+2116	2358	8014626663869703	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part5.pbi	b6a87e8f7120275a
+2021	2500	8014626665275003	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part4.pbi	5976fbac6b67a3da
+2505	2997	8014626670258339	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend.pbd	e960b490bbb95bb
+3000	5334	8014626693012247	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend.pbw	7a704db8d0e8236
+2	286	8014626798918203	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Application/User/Core/main.pbi	3d4a9a131194be92
+288	685	8014626802904872	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend_part0.pbi	bd9f9ea1f5fcf9b7
+690	1195	8014626808007807	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend.pbd	e960b490bbb95bb
+1199	3512	8014626830592281	D:/Work/950/RVZD_наработки/Исходники/Stend/EWARM/Stend/BrowseInfo/Stend.pbw	7a704db8d0e8236

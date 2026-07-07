@@ -1,0 +1,99 @@
+@startuml Logger_Main_Algorithm
+' ============================================================
+' Логгер LSM6DSV320X — Общий алгоритм работы
+' Версия: 1.0  |  MCU: STM32L433CCT3
+' ============================================================
+
+skinparam ActivityBackgroundColor #37474F
+skinparam ActivityBorderColor     #90A4AE
+skinparam ActivityFontColor       white
+skinparam ActivityFontSize        13
+skinparam ActivityArrowColor      #546E7A
+skinparam ArrowFontSize           11
+skinparam ArrowFontColor          #37474F
+skinparam DiamondBackgroundColor  #5C6BC0
+skinparam DiamondBorderColor      #3949AB
+skinparam DiamondFontColor        white
+skinparam BackgroundColor         #FAFAFA
+skinparam DefaultFontName         Arial
+
+title Логгер LSM6DSV320X — Общий алгоритм
+
+start
+
+#455A64 :**ВКЛЮЧЕНИЕ ПИТАНИЯ**\nОт батарейки LS 14250 или USB;
+
+#37474F :HAL_Init()\nSystemClock_Config() — 16 МГц (MSI+PLL)\nMX_GPIO / I2C / SPI / QUADSPI / USB / RTC / ADC;
+
+if (**USB VBUS** обнаружен?) then (ДА — USB подключён)
+  #1565C0 :Инициализация **USB CDC**\n(Виртуальный COM-порт);
+  #1976D2 :Отправить **INFO**:\nВерсия прошивки, WHO_AM_I датчика,\nСтатус Flash, заполненность памяти;
+
+  repeat
+    #1976D2 :Ожидание команды от **Qt-программы**\n(USB CDC UART приём);
+
+    switch (Команда Qt?)
+      case (READ LOG)
+        #0277BD :Выгрузка лога из **Flash P25Q128H**\nпо USB CDC (бинарный / CSV);
+      case (ERASE LOG)
+        #0277BD :Полная очистка **Flash P25Q128H**\nСброс указателей записи;
+      case (SET MODE [1/2/3])
+        #00796B :Сохранить режим логгирования\nв **FRAM FM25V10A-G** (конфиг);
+      case (SET ODR [Гц])
+        #00796B :Установить частоту опроса датчика\n(Режим 1/2). Сохранить в FRAM;
+      case (SET FS_XL / FS_G)
+        #00796B :Установить диапазон:\nАкселерометр (±2..±320g)\nГироскоп (±125..±4000 dps)\nСохранить в FRAM;
+      case (SET THRESHOLD)
+        #00838F :Установить порог скорости вращения\n(по умолчанию 10 об/мин)\nСохранить в FRAM;
+      case (UPDATE FSM)
+        #6A1B9A :Загрузить программу FSM\nв датчик **LSM6DSV320X**\n(через I2C, Unico-GUI формат);
+      case (START WORK)
+        #B71C1C :Сохранить конфигурацию\nОтключить USB\nПереход в **РАБОЧИЙ РЕЖИМ**;
+    endswitch
+
+  repeat while (Команда == START WORK?) is (НЕТ) not (ДА — START WORK)
+
+else (НЕТ — нет USB)
+endif
+
+' ── РАБОЧИЙ РЕЖИМ ──────────────────────────────────────────
+#2E7D32 :Инициализация **RTC**\nЧтение времени из батарейного RTC;
+
+#2E7D32 :Чтение конфигурации из **FRAM FM25V10A-G**\n(режим, ODR, FS, пороги);
+
+#388E3C :Инициализация датчика **LSM6DSV320X**\nI2C WHO_AM_I проверка\nУстановка ODR, FS, FSM;
+
+switch (Режим логгирования?)
+
+  case (Режим 1 — НЕПРЕРЫВНЫЙ)
+    #00695C :Непрерывное считывание:\n**Акс. X/Y/Z + Гиро X/Y/Z**\nСогласно ODR (до 1 кГц)\nПериодически: температура;
+    repeat
+      #004D40 :Читаем семпл из LSM6DSV\n(I2C burst read 12 байт);
+      #004D40 :Метка времени **HAL_GetTick()**;
+      #4527A0 :Запись фрейма в **Flash P25Q128H**\n(SPI, 12–14 байт/фрейм)\nили буфер в **FRAM**;
+      if (FRAM буфер полон?) then (ДА)
+        #4527A0 :Flush FRAM → Flash\n(стирание сектора 4KB);
+      endif
+    repeat while (Flash заполнен?) is (НЕТ)
+
+  case (Режим 2 — ПО АКТИВНОСТИ)
+    #005B4F :Датчик: **Low-Power + Wake-Up INT1**\nМК: **Stop-режим** (2 мкА);
+    repeat
+      #00695C :Прерывание **INT1** от LSM6DSV\n(WAKE-UP детектор FSM);
+      #004D40 :Выход из **Stop**, инициализация;
+      #004D40 :Читаем данные датчика\nАкс. X/Y/Z + Гиро X/Y/Z;
+      #4527A0 :Запись в **Flash P25Q128H**\nс меткой времени RTC;
+      #004D40 :Возврат в **Stop-режим**\n(ожидание следующего события);
+    repeat while (Flash заполнен?) is (НЕТ)
+
+  case (Режим 3 — ЦИКЛ ВРАЩЕНИЯ)
+    #00695C :→ Подробный автомат состояний\nсм. файл **logger_mode3.puml**;
+    #004D40 :Запись 24-байт структур\nв **Flash P25Q128H**\n(~700 000 записей max);
+
+endswitch
+
+#B71C1C :Flash заполнен — СТОП\nОжидание подключения USB\nдля выгрузки лога;
+
+stop
+
+@enduml
