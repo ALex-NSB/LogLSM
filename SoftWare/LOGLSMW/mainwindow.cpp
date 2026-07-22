@@ -187,6 +187,16 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
+    // Фиксированный размер окна (22.07.2026): раньше окно расширялось под
+    // самую широкую вкладку («Тест памяти», гекс-дамп без переноса строк) и
+    // не сжималось обратно при переключении на более узкие вкладки. Теперь
+    // размер зафиксирован под экран пользователя (2560×1440 @175%), а
+    // содержимое «Тест памяти» ужато отдельно (см. frameMemInfo в .ui).
+    // Диапазон размера окна (22.07.2026): вместо жёсткого фикса — можно
+    // потянуть в пределах, чтобы не упираться в край на маленьких
+    // мониторах и не растягивать пустоту на больших.
+    setFixedSize(800, 650);
+
     setupStatusBar();
     setupDashboardPlots();
 
@@ -1336,7 +1346,7 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         const qint64 ad    = qAbs(diff);
         const qint64 alarm = qint64(ui->spinTimeAlarm->value()) * 60;
 
-        if (m_actSyncPending && tag == TagSyncTime) {
+        if (m_actSyncPending) {
             m_actSyncPending = false;
             // Успех одиночного клика — ОСТАЁТСЯ жёлтым (Active), не Done.
             activationSetSectorMinDelay(2, (ad <= 1)
@@ -5775,7 +5785,7 @@ void MainWindow::renderHexDump(quint16 startPage, const QByteArray &buf)
         if (off > 0 && off % pageBytes == 0)
             out += QString(60, QChar(0x2500)) + QLatin1Char('\n');
         const quint32 addr = (quint32(startPage) << 8) + quint32(off);
-        out += QStringLiteral("%1:  ").arg(addr, 6, 16, QLatin1Char('0')).toUpper();
+        out += QStringLiteral("  %1:  ").arg(addr, 6, 16, QLatin1Char('0')).toUpper();
         QStringList words;
         for (int w = 0; w < wordsPerLine; ++w) {
             const int i = off + w * 2;

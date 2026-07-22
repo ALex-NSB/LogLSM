@@ -705,8 +705,9 @@
           <!-- Левый: Параметры / Состояние — фиксированная ширина по содержимому -->
           <item>
            <widget class="QGroupBox" name="groupMemParams">
-            <property name="title"><string>Параметры / Состояние</string></property>
+            <property name="title"><string></string></property>
             <property name="sizePolicy"><sizepolicy hsizetype="Fixed" vsizetype="Preferred"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+            <property name="maximumSize"><size><width>195</width><height>16777215</height></size></property>
             <layout class="QGridLayout" name="memParamsGrid">
              <!-- Расположение записанного образа (факт) — заполняется
                   автоматически после записи «Образ RG/LOG». Подписи
@@ -736,27 +737,27 @@
              <item row="2" column="2"><widget class="QLabel" name="lblHdrFact"><property name="text"><string>Факт</string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item>
              <!-- Байт -->
              <item row="3" column="0"><widget class="QLabel" name="lblTestByteCap"><property name="text"><string>Байт</string></property></widget></item>
-             <item row="3" column="1"><widget class="QLineEdit" name="editTestByte"><property name="text"><string>00</string></property></widget></item>
-             <item row="3" column="2"><widget class="QLabel" name="lblCurByte"><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+             <item row="3" column="1"><widget class="QLineEdit" name="editTestByte"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string>00</string></property></widget></item>
+             <item row="3" column="2"><widget class="QLabel" name="lblCurByte"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
              <!-- Страниц -->
              <item row="4" column="0"><widget class="QLabel" name="lblPagesCap"><property name="text"><string>Страниц</string></property></widget></item>
-             <item row="4" column="1"><widget class="QSpinBox" name="spinMemPages"><property name="minimum"><number>1</number></property><property name="maximum"><number>65536</number></property><property name="value"><number>10</number></property></widget></item>
-             <item row="4" column="2"><widget class="QLabel" name="lblCurPages"><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+             <item row="4" column="1"><widget class="QSpinBox" name="spinMemPages"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="minimum"><number>1</number></property><property name="maximum"><number>65536</number></property><property name="value"><number>10</number></property></widget></item>
+             <item row="4" column="2"><widget class="QLabel" name="lblCurPages"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
              <!-- Старт (страница-адрес начала операции) — переименовано из
                   «Страница» 02.07.2026: путалось со строкой «Страниц» выше
                   (количество) — визуально почти одинаковые подписи одна над
                   другой. -->
              <item row="5" column="0"><widget class="QLabel" name="lblStartPageCap"><property name="text"><string>Старт</string></property></widget></item>
-             <item row="5" column="1"><widget class="QSpinBox" name="spinMemStartPage"><property name="maximum"><number>65535</number></property><property name="value"><number>0</number></property></widget></item>
-             <item row="5" column="2"><widget class="QLabel" name="lblCurActivePage"><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+             <item row="5" column="1"><widget class="QSpinBox" name="spinMemStartPage"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="maximum"><number>65535</number></property><property name="value"><number>0</number></property></widget></item>
+             <item row="5" column="2"><widget class="QLabel" name="lblCurActivePage"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
              <!-- SPI МГц -->
              <item row="6" column="0"><widget class="QLabel" name="lblSpiCap"><property name="text"><string>SPI, МГц</string></property></widget></item>
-             <item row="6" column="1"><widget class="QSpinBox" name="spinMemSpi"><property name="maximum"><number>104</number></property><property name="value"><number>40</number></property></widget></item>
-             <item row="6" column="2"><widget class="QLabel" name="lblCurSpi"><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+             <item row="6" column="1"><widget class="QSpinBox" name="spinMemSpi"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="maximum"><number>104</number></property><property name="value"><number>40</number></property></widget></item>
+             <item row="6" column="2"><widget class="QLabel" name="lblCurSpi"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
              <!-- Циклов -->
              <item row="7" column="0"><widget class="QLabel" name="lblMemCyclesCap"><property name="text"><string>Циклов</string></property></widget></item>
-             <item row="7" column="1"><widget class="QSpinBox" name="spinMemCycles"><property name="maximum"><number>1000000</number></property><property name="value"><number>1</number></property></widget></item>
-             <item row="7" column="2"><widget class="QLabel" name="lblCurCycle"><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+             <item row="7" column="1"><widget class="QSpinBox" name="spinMemCycles"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="maximum"><number>1000000</number></property><property name="value"><number>1</number></property></widget></item>
+             <item row="7" column="2"><widget class="QLabel" name="lblCurCycle"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
              <!-- Ошибок -->
              <item row="8" column="0"><widget class="QLabel" name="lblErrCap"><property name="text"><string>Ошибок, байт</string></property></widget></item>
              <item row="8" column="1"><widget class="QLabel" name="lblCurStep"><property name="maximumHeight"><number>26</number></property><property name="text"><string> </string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item>
@@ -769,10 +770,12 @@
           <item>
            <widget class="QWidget" name="wgtMemRight">
             <property name="sizePolicy"><sizepolicy hsizetype="Fixed" vsizetype="Preferred"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+            <property name="maximumSize"><size><width>170</width><height>16777215</height></size></property>
             <layout class="QVBoxLayout" name="memRightLayout">
              <property name="spacing"><number>6</number></property>
             <item>
              <widget class="QGroupBox" name="groupMemTemp">
+              <property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Expanding"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
               <property name="title"><string>Термотест</string></property>
               <layout class="QVBoxLayout" name="memTempLayout">
                <item>
@@ -796,11 +799,11 @@
                <item>
                 <layout class="QFormLayout" name="memTempForm">
                  <item row="0" column="0"><widget class="QLabel" name="lblTMaxCap"><property name="text"><string>МАКС °C</string></property></widget></item>
-                 <item row="0" column="1"><widget class="QSpinBox" name="spinTMax"><property name="minimum"><number>-50</number></property><property name="maximum"><number>150</number></property><property name="value"><number>85</number></property></widget></item>
+                 <item row="0" column="1"><widget class="QSpinBox" name="spinTMax"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="buttonSymbols"><enum>QAbstractSpinBox::NoButtons</enum></property><property name="minimum"><number>-50</number></property><property name="maximum"><number>150</number></property><property name="value"><number>85</number></property></widget></item>
                  <item row="1" column="0"><widget class="QLabel" name="lblTMinCap"><property name="text"><string>МИН °C</string></property></widget></item>
-                 <item row="1" column="1"><widget class="QSpinBox" name="spinTMin"><property name="minimum"><number>-50</number></property><property name="maximum"><number>150</number></property><property name="value"><number>-20</number></property></widget></item>
+                 <item row="1" column="1"><widget class="QSpinBox" name="spinTMin"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="buttonSymbols"><enum>QAbstractSpinBox::NoButtons</enum></property><property name="minimum"><number>-50</number></property><property name="maximum"><number>150</number></property><property name="value"><number>-20</number></property></widget></item>
                  <item row="2" column="0"><widget class="QLabel" name="lblTStepCap"><property name="text"><string>ШАГ</string></property></widget></item>
-                 <item row="2" column="1"><layout class="QHBoxLayout" name="memStepLayout"><property name="spacing"><number>4</number></property><item><widget class="QSpinBox" name="spinTStep"><property name="minimum"><number>1</number></property><property name="maximum"><number>50</number></property><property name="value"><number>5</number></property><property name="suffix"><string> °C</string></property><property name="toolTip"><string>Шаг температуры: операция запускается при изменении на столько градусов</string></property></widget></item><item><widget class="QSpinBox" name="spinTPasses"><property name="minimum"><number>1</number></property><property name="maximum"><number>1000</number></property><property name="value"><number>10</number></property><property name="suffix"><string> стр</string></property><property name="toolTip"><string>Проходов: сколько страниц (от «Старт») записать и сверить на каждой температурной точке</string></property></widget></item></layout></item>
+                 <item row="2" column="1"><layout class="QHBoxLayout" name="memStepLayout"><property name="spacing"><number>4</number></property><item><widget class="QSpinBox" name="spinTStep"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="buttonSymbols"><enum>QAbstractSpinBox::NoButtons</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>50</number></property><property name="value"><number>5</number></property><property name="suffix"><string> °C</string></property><property name="toolTip"><string>Шаг температуры: операция запускается при изменении на столько градусов</string></property></widget></item><item><widget class="QSpinBox" name="spinTPasses"><property name="minimumWidth"><number>66</number></property><property name="maximumWidth"><number>66</number></property><property name="buttonSymbols"><enum>QAbstractSpinBox::NoButtons</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>1000</number></property><property name="value"><number>10</number></property><property name="suffix"><string> стр</string></property><property name="toolTip"><string>Проходов: сколько страниц (от «Старт») записать и сверить на каждой температурной точке</string></property></widget></item></layout></item>
                 </layout>
                </item>
                <item>
@@ -814,12 +817,13 @@
             <!-- Питание -->
             <item>
              <widget class="QGroupBox" name="groupMemPower">
-              <property name="title"><string>Питание</string></property>
-              <layout class="QFormLayout" name="memPowerLayout">
-               <item row="0" column="0"><widget class="QLabel" name="lblVddCap"><property name="text"><string>VDD</string></property></widget></item>
-               <item row="0" column="1"><widget class="QLabel" name="lblVddVal"><property name="text"><string>— В</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
-               <item row="1" column="0"><widget class="QLabel" name="lblVbatCap"><property name="text"><string>VBAT</string></property></widget></item>
-               <item row="1" column="1"><widget class="QLabel" name="lblVbatVal"><property name="text"><string>— В</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+              <property name="title"><string></string></property>
+              <layout class="QHBoxLayout" name="memPowerLayout">
+               <property name="spacing"><number>4</number></property>
+               <item><widget class="QLabel" name="lblVddCap"><property name="text"><string>VDD</string></property></widget></item>
+               <item><widget class="QLabel" name="lblVddVal"><property name="text"><string>— В</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+               <item><widget class="QLabel" name="lblVbatCap"><property name="text"><string>VBAT</string></property></widget></item>
+               <item><widget class="QLabel" name="lblVbatVal"><property name="text"><string>— В</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
               </layout>
              </widget>
             </item>
@@ -830,6 +834,11 @@
           <!-- Гекс-дамп образа (кнопка «Прочитать») -->
           <item>
            <widget class="QFrame" name="frameMemInfo">
+            <!-- Ограничение ширины (22.07.2026): без этого QPlainTextEdit
+                 с NoWrap растягивал всю вкладку (и окно) под длинные строки
+                 дампа. Теперь ширина ограничена, длинные строки доступны
+                 горизонтальной прокруткой внутри самого дампа. -->
+            <property name="maximumSize"><size><width>405</width><height>16777215</height></size></property>
             <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
             <property name="frameShadow"><enum>QFrame::Sunken</enum></property>
             <layout class="QVBoxLayout" name="memInfoLayout">
@@ -865,28 +874,9 @@
         <!-- Лог -->
         <item>
          <widget class="QPlainTextEdit" name="memReport">
+          <property name="sizePolicy"><sizepolicy hsizetype="Expanding" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+          <property name="maximumHeight"><number>55</number></property>
           <property name="readOnly"><bool>true</bool></property>
-         </widget>
-        </item>
-
-        <item>
-         <widget class="QGroupBox" name="groupDevInfo">
-          <property name="title"><string>Индивидуальная информация устройства (внутр. Flash STM32)</string></property>
-          <layout class="QHBoxLayout" name="devInfoLayout">
-           <item><widget class="QLabel" name="lblSerialCap"><property name="text"><string>Серийный №</string></property></widget></item>
-           <item><widget class="QLineEdit" name="editSerial"><property name="text"><string>LSMA-0000</string></property></widget></item>
-           <item><widget class="QLabel" name="lblVariantCap"><property name="text"><string>Вариант</string></property></widget></item>
-           <item>
-            <widget class="QComboBox" name="cmbDevVariant">
-             <item><property name="text"><string>A (LSM6DSO)</string></property></item>
-             <item><property name="text"><string>B (LSM6DSV320X)</string></property></item>
-            </widget>
-           </item>
-           <item><widget class="QLabel" name="lblProdDateCap"><property name="text"><string>Дата выпуска</string></property></widget></item>
-           <item><widget class="QLineEdit" name="editProdDate"><property name="text"><string>2026-06-16</string></property></widget></item>
-           <item><widget class="QPushButton" name="btnDevInfoRead"><property name="text"><string>Прочитать</string></property></widget></item>
-           <item><widget class="QPushButton" name="btnDevInfoWrite"><property name="text"><string>Записать</string></property></widget></item>
-          </layout>
          </widget>
         </item>
        </layout>
@@ -1073,9 +1063,12 @@
       <item>
      <widget class="QGroupBox" name="groupCompare">
       <!-- Expanding по вертикали: высота = высоте левой колонки (см.
-           комментарий у groupCyclogram), жёсткие 480px у cmpReport убраны -->
+           комментарий у groupCyclogram), жёсткие 480px у cmpReport убраны.
+           Expanding по горизонтали (22.07.2026): раньше hsizetype=Fixed
+           оставлял пустую полосу справа при фиксированном окне 1200px —
+           теперь панель сама занимает освободившееся место. -->
       <property name="sizePolicy">
-       <sizepolicy hsizetype="Fixed" vsizetype="Expanding">
+       <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
         <horstretch>0</horstretch>
         <verstretch>0</verstretch>
        </sizepolicy>
@@ -1288,6 +1281,29 @@
       <widget class="QWidget" name="tabCalibration">
        <attribute name="title"><string>Калибровка</string></attribute>
        <layout class="QVBoxLayout" name="calibLayout">
+        <item>
+         <!-- Перенесено с вкладки «Тест памяти» (22.07.2026): паспортные
+              данные устройства логичнее среди остальных поэкземплярных
+              параметров на «Калибровке». -->
+         <widget class="QGroupBox" name="groupDevInfo">
+          <property name="title"><string>Индивидуальная информация устройства (внутр. Flash STM32)</string></property>
+          <layout class="QHBoxLayout" name="devInfoLayout">
+           <item><widget class="QLabel" name="lblSerialCap"><property name="text"><string>Серийный №</string></property></widget></item>
+           <item><widget class="QLineEdit" name="editSerial"><property name="text"><string>LSMA-0000</string></property></widget></item>
+           <item><widget class="QLabel" name="lblVariantCap"><property name="text"><string>Вариант</string></property></widget></item>
+           <item>
+            <widget class="QComboBox" name="cmbDevVariant">
+             <item><property name="text"><string>A (LSM6DSO)</string></property></item>
+             <item><property name="text"><string>B (LSM6DSV320X)</string></property></item>
+            </widget>
+           </item>
+           <item><widget class="QLabel" name="lblProdDateCap"><property name="text"><string>Дата выпуска</string></property></widget></item>
+           <item><widget class="QLineEdit" name="editProdDate"><property name="text"><string>2026-06-16</string></property></widget></item>
+           <item><widget class="QPushButton" name="btnDevInfoRead"><property name="text"><string>Прочитать</string></property></widget></item>
+           <item><widget class="QPushButton" name="btnDevInfoWrite"><property name="text"><string>Записать</string></property></widget></item>
+          </layout>
+         </widget>
+        </item>
         <item>
          <widget class="QLabel" name="lblCalibStub">
           <property name="text"><string>Вкладка «Калибровка» — в разработке.
