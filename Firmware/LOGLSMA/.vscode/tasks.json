@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "cmake",
+            "label": "CMake build (Debug)",
+            "command": "cleanRebuild",
+            "targets": [
+                "all"
+            ],
+            "preset": "Debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "ПОЛНАЯ пересборка LOGLSMA перед прошивкой (mtime-независимо: правки Claude не обновляют время файла, инкрементальный ninja их пропускает)."
+        }
+    ]
+}

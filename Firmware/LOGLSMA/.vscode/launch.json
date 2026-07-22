@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug STM32L433CC (ST-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "preLaunchTask": "CMake build (Debug)",
+            "cwd": "D:/AIPrj/LogLSM/Firmware/LOGLSMA",
+            "executable": "D:/AIPrj/LogLSM/Firmware/LOGLSMA/build/Debug/LOGLSMA.elf",
+            "servertype": "stlink",
+            "device": "STM32L433CC",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "armToolchainPath": "D:/ST/STM32Cube/STM32CubeCLT_1.21.0/GNU-tools-for-STM32/bin",
+            "serverpath": "D:/ST/STM32Cube/STM32CubeCLT_1.21.0/STLink-gdb-server/bin/ST-LINK_gdbserver.exe",
+            "gdbPath": "D:/ST/STM32Cube/STM32CubeCLT_1.21.0/GNU-tools-for-STM32/bin/arm-none-eabi-gdb.exe",
+            "stm32cubeprogrammer": "D:/ST/STM32Cube/STM32CubeProgrammer/bin"
+        }
+    ]
+}

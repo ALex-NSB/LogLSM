@@ -42,6 +42,7 @@ void Service(RegistratorData *r);
  * WKUP1 и молча возвращается, если кабеля нет. Payload 16 байт — см.
  * реализацию в com.c. */
 void PushCycleRecord(RegistratorData *r);
+void PushWdgKick(void);   /* 0x25: метка «сторож поглажен» (при кабеле), 18.07.2026 */
 
 /* Общий шаг конечного автомата SLEEP->CONFIRM->ROTATING (02.07.2026).
  * Вызывается ТОЛЬКО из main.c (WORK/PASSIVE-цикл, настоящий Stop2) — вне

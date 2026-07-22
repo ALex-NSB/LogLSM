@@ -7,7 +7,7 @@
   * @attention
   *
   * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
+  * All rights reserved.проверка
   *
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directory of this software component.
@@ -93,6 +93,14 @@ volatile uint8_t g_wakeCause = 0;
  * питанию/BOR. */
 uint16_t g_restartsTimer = 0;
 uint16_t g_restartsPower = 0;
+
+/* IWDG — сторож ЖИВОГО кода (17.07.2026, wake_architecture §3). Включается
+ * только если опционный бит IWDG_STOP стоит на «заморозку в Stop» (иначе
+ * сбрасывал бы прибор в легитимном долгом сне). g_iwdg_on=1 после включения.
+ * iwdg_kick() — рефреш; зовём в главном цикле, в Service() и в долгих
+ * операциях (стирание). Объявлен в globals.h для доступа из com.c. */
+volatile uint8_t g_iwdg_on = 0;
+void iwdg_kick(void) { if (g_iwdg_on) IWDG->KR = 0x0000AAAAu; }
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -245,12 +253,33 @@ int main(void)
    * пользователя. */
   regist.monitoringActive = 0;
   regist.testNoSleep = 0;   /* «Работа» по умолчанию; «Тест» (0x23) взводит */
+
+  /* ── IWDG + RTC в ПАРЕ (modes_and_timers §3, 17.07.2026) ─────────────────
+   * IWDG тикает и в Stop2 (LSI ~32 кГц, макс ~32 c), НЕ замораживаем. Защита от
+   * ложного сброса в долгом сне — RTC-wakeup-таймер будит МК < 32 c и гладит
+   * сторож (iwdg_kick при пробуждении). Так один механизм ловит И зависание
+   * бодрого кода, И «мёртвый сон» (если пробуждение/RTC не дошло до рефреша —
+   * IWDG сбросит → recovery). RTC-часы при этом идут всегда. Опционный байт не
+   * нужен. /256 × 4095 ≈ 32 c; RTC-wake в глубоком сне ~25 c (см. ниже).
+   * ⚠ IWDG после старта не выключается до сброса. */
+  /* ⚠ Порядок как в HAL_IWDG_Init (18.07.2026, фикс зависания 07:18): СНАЧАЛА
+   * старт (KR=CCCC — он же аппаратно включает LSI), потом конфиг PR/RLR. В
+   * прежнем порядке (старт последним) LSI был выключен → SR-флаги синхронизации
+   * не сбрасывались → вечный while ДО главного цикла (устройство молчало). */
+  IWDG->KR  = 0x0000CCCCu;   /* СТАРТ сторожа (включает LSI) */
+  IWDG->KR  = 0x00005555u;   /* доступ к PR/RLR */
+  IWDG->PR  = 6u;            /* делитель /256 */
+  IWDG->RLR = 4095u;         /* период ~32 c */
+  while (IWDG->SR != 0u) { } /* дождаться применения PR/RLR (LSI уже тикает) */
+  IWDG->KR  = 0x0000AAAAu;   /* рефреш (загрузка RLR) */
+  g_iwdg_on = 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    iwdg_kick();   /* рефреш сторожа в бодром цикле (17.07.2026) */
     /* Вход в SERVICE (режим B — полноценный захватывающий Service(), для
      * произвольных LTP-команд: «Тест памяти», «Мониторинг» и т.п.) —
      * 02.07.2026, финальная версия: ТОЛЬКО по текущему УРОВНЮ WKUP1
@@ -336,6 +365,7 @@ int main(void)
        * штатно (LOGLSMW не должен опрашивать 0x8D во время теста). */
       if (wkup1_pin_set())
         ComPoll();
+      PushWdgKick();   /* kick-метка и из бодрых фаз (троттл 20 c внутри), 18.07 */
       RotationStateStep(&regist);
     }
     else /* REG_STATE_SLEEP (в т.ч. когда мониторинг ещё не запущен) */
@@ -426,32 +456,130 @@ int main(void)
        * даже после того, как EXTI13 стал реально будить из Stop2). */
       __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WUF1);
       __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WUF2);
-      /* EXTI13 включаем ТОЛЬКО на время сна (будильник Stop2), с чистого
-       * pending. Вне сна он выключен (см. init) — иначе INT1 сыпал прерывания
-       * в бодрый путь и глушил UART/Flash/Тест. */
       __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_13);
       HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
-      HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+      /* 3-УРОВНЕВЫЙ АВТОМАТ (11.07.2026): источник пробуждения зависит от фазы.
+       *  - deepSleep=1 (ГЛУБОКИЙ СОН, долго нет активности): будит ТОЛЬКО
+       *    движение — accel Wake-Up/INT1 через EXTI13, RTC ВЫКЛЮЧЕН. Никакого
+       *    опроса в покое → автономность. Спин НЕ грозит: в покое мотор стоит,
+       *    вибрации нет → INT1 не спамит (спин раньше давал арм EXTI13 во время
+       *    активности — здесь EXTI13 армится ИСКЛЮЧИТЕЛЬНО в покое).
+       *  - deepSleep=0 («ПРОВЕРКА», недавно была активность): периодический RTC
+       *    (~2 c) для проверки длительности/скорости; EXTI13 НЕ армим (мотор
+       *    может крутиться → сыпал бы INT1).
+       * accel Wake-Up (417 HP + Enable_Wake_Up_Detection) настроен в
+       * cmdStartRegister — INT1 маршрут готов для обоих режимов. */
+      /* Глубокий сон в «Работе» — БЕЗУСЛОВНО (11.07.2026, по решению
+       * пользователя): «Работа» = полноценный автономный режим, глубокий сон
+       * даже на стенде с кабелем — чтобы проверять реальное полевое поведение.
+       * Кабельная работа (Flash-scan, сервис, всегда на связи) — это режим
+       * «Тест» (testNoSleep=1, не спит). Следствие: в «Работе» спящее
+       * устройство недостижимо по LTP (бар Флеш покажет «сканирование…»/нет
+       * ответа, 0x22 не дойдёт в глубоком сне) — это ожидаемо, для связи —
+       * «Тест» или пробуждение движением. */
+      uint8_t deep = regist.deepSleep;   /* deep=1 = ПАССИВ (дремота), deep=0 = «Проверка» */
+      if (deep)
+        HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);   /* Пассив: будит ДВИЖЕНИЕ (accel/EXTI13) */
+      /* RTC-wakeup-таймер в ОБОИХ ярусах (design B, IWDG+RTC, 17.07.2026):
+       * период < таймаут IWDG, на пробуждении гладим сторож (iwdg_kick в цикле)
+       * и не «спим навсегда». «Проверка» — ~1 c; Пассив — страховочный ~25 c
+       * (< 32 c IWDG), редко → автономность почти цела (+<1 мкА). Часы (LSE)
+       * идут всегда независимо; здесь — именно периодическое ПРОБУЖДЕНИЕ. */
+      HAL_NVIC_ClearPendingIRQ(RTC_WKUP_IRQn);
+      HAL_NVIC_EnableIRQ(RTC_WKUP_IRQn);
+      HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, deep ? 25u : 1u, RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
+
       HAL_SuspendTick();
       HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
       HAL_ResumeTick();
-      HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);   /* проснулись — EXTI больше не нужен */
-      ServiceClock_Config();
 
-      /* Проснулись из Stop2. Разбудить могло ТОЛЬКО EXTI13 (INT1/движение):
-       * EXTI0 на WKUP1 не заведён, RTC-будильник не настроен — иных
-       * источников нет. Поэтому ЛЮБОЙ выход трактуем как движение → гироскоп
-       * + CONFIRM (там уже отсеивается случайный удар от настоящего
-       * вращения). Флаги WUFx как признак источника НЕ используем: WUF2 в
-       * Stop2 может не залипнуть, WUF1 на стенде залипает ложно (кабель
-       * статически HIGH — см. очистку перед сном выше). Остановку кабелем во
-       * сне не поддерживаем (нужен EXTI0); штатный стоп — CMD_STOP_REGISTER
-       * 0x22 в бодрой фазе CONFIRM/ROTATING (ComPoll выше). */
-      if (regist.monitoringActive)
+      HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+      HAL_NVIC_DisableIRQ(RTC_WKUP_IRQn);
+      HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);   /* проснулись — источники сна больше не нужны */
+      ServiceClock_Config();
+      PushWdgKick();   /* RTC-глажение сторожа в «Работе» → метка 0x25 при кабеле (18.07.2026) */
+
+      /* Источник пробуждения из ПАССИВА (design B, 17.07.2026): WUF2 (фронт
+       * INT1/PC13, EWUP2 включён) = ДВИЖЕНИЕ → в «Проверку». WUF2 чист = только
+       * RTC-страховка IWDG → сторож поглажен в цикле, гироскоп НЕ будим, спим
+       * дальше в Пассиве (автономность цела). «Проверка» (deep=0) — всегда проверка. */
+      uint8_t movementWake = 1;
+      if (deep)
       {
+        movementWake = __HAL_PWR_GET_FLAG(PWR_FLAG_WUF2) ? 1u : 0u;
+        if (movementWake) { regist.deepSleep = 0; regist.idleChecks = 0; }
+        else                regist.deepSleep = 1;
+      }
+
+      /* Проснулись из Stop2. Источник — RTC (в «Проверке») или accel-INT/EXTI13
+       * (из глубокого сна, по движению), см. deep-логику выше. ЛЮБОЙ выход
+       * трактуем как «пора проверить вращение» → гироскоп + CONFIRM (там
+       * отсеивается отсутствие вращения от настоящего). Флаги WUFx как признак
+       * источника НЕ используем. Остановку кабелем во сне не поддерживаем
+       * (нужен EXTI0); штатный стоп — CMD_STOP_REGISTER 0x22 в бодрой фазе
+       * CONFIRM/ROTATING (ComPoll выше). */
+      /* movementWake=0 (только RTC-страховка IWDG в Пассиве) → гироскоп НЕ
+       * трогаем, верх цикла снова уложит в Пассив (17.07.2026). */
+      if (movementWake && regist.monitoringActive)
+      {
+        /* ГИРОСКОП-ТРОТТЛ Пассивный→Активный (12.07.2026). Гироскоп — самый
+         * дорогой узел, поэтому НЕ крутим его на каждом accel-пробуждении: accel
+         * Wake-Up слушаем всегда (Пассивный, дёшево), а вход в Активный (гироскоп
+         * + CONFIRM) разрешаем не чаще раза в gyroRecheckSec. Порог измеряем по
+         * всегда-идущему календарю RTC (1 с). gyroCheckPending=1 (старт/после
+         * цикла) форсирует первую проверку без троттла. Из тишины elapsed велик
+         * → проверка сразу (задержка ≈ прогрев 0.4 c). На упорной вибрации без
+         * вращения — дешёвый возврат в глубокий сон, интервал эскалирует (см.
+         * com.c). */
+        RTC_DateTime nowTs;
+        RTC_GetTimeDate(&nowTs);
+        uint32_t sinceGyro = RTC_SubTimeDateSec(&nowTs, &regist.lastGyroCheck);
+        /* Троттлим ТОЛЬКО пробуждения из ГЛУБОКОГО сна (deep=1, источник = accel-
+         * INT). RTC-опросы фазы «Проверка» (deep=0) НЕ троттлим — именно они
+         * добирают маргинальный низкооборотный старт за пару опросов; если их
+         * пропускать, реальный старт срезается (был −8 c на 7 об/мин). */
+        if (deep && !regist.gyroCheckPending && sinceGyro < regist.gyroRecheckSec)
+        {
+          /* Рано для гироскопа — Активный НЕ трогаем. Дешёвое пробуждение назад
+           * в Пассивный (глубокий сон, accel слушаем дальше). Ток минимальный. */
+          regist.deepSleep = 1;
+          /* state остаётся REG_STATE_SLEEP → верх цикла снова уложит в Stop2 с
+           * armed accel, гироскоп не включался. */
+        }
+        else
+        {
+        regist.gyroCheckPending = 0;
+        regist.lastGyroCheck    = nowTs;
+        /* НЕТ МЁРТВОГО ВРЕМЕНИ (11.07.2026): старт цикла = МОМЕНТ ПРОБУЖДЕНИЯ
+         * (в глубоком сне это фронт движения/accel-INT = реальный пуск мотора).
+         * Фиксируем СРАЗУ, ДО прогрева/CONFIRM — счёт идёт с этого мгновения,
+         * без задержки на подтверждение. Если вращение не подтвердится (CONFIRM
+         * истечёт) — цикл просто не запишется (сброс). Убирает остаток −latency
+         * от прогрева+опросов CONFIRM. */
+        regist.rot.startTimeStamp = nowTs;
+        regist.rot.lastRotStamp = regist.rot.startTimeStamp;
+        regist.rot.maxRate = regist.rot.maxVibr = 0;
+        regist.rateSum = 0; regist.rateCount = 0; regist.avgRate = 0;
+        regist.rotWarmup = 1;
         LSM6DSO_GYRO_Enable(&lsm);
+        /* ПРОГРЕВ ГИРОСКОПА (11.07.2026). После сна гироскоп был выключен;
+         * сразу после Enable первые отсчёты — мусор/ноль (turn-on). А
+         * Poll_Sensor ждёт DRDY АКСЕЛЕРОМЕТРА (сейчас 417 Гц → DRDY каждые
+         * ~2.4 мс), поэтому все 5 опросов CONFIRM пролетают за ~35 мс — раньше,
+         * чем гироскоп (12.5 Гц) выдаст валидный отсчёт → RotationDetected=ложь
+         * даже при вращении (счётчик RTC тикал сквозь вращающийся стенд-цикл,
+         * но цикл не писался). Ждём ~200 мс (2-3 периода гиро) — тогда CONFIRM
+         * читает устоявшуюся угловую скорость и ловит вращение.
+         * 200→400 мс (11.07.2026): 1-й цикл на 10 об/мин терялся — 10 об/мин у
+         * самого порога (≈857 LSB против GYRO_THRESHOLD 600, запас ~1.4×), за
+         * 200 мс свежий гироскоп не успевал выйти на стабильное значение и
+         * проваливался ниже порога («Общее» −10 c). 400 мс = ~5 отсчётов при
+         * 12.5 Гц — полное успокоение, нижний порог ловится надёжно. */
+        HAL_Delay(400);
         regist.confirmPolls = 0;
         regist.state = REG_STATE_CONFIRM;
+        } /* else — троттл разрешил гироскоп-проверку (вход в Активный) */
       }
       } /* else — реальный Stop2 (не «Тест») */
     }
@@ -590,6 +718,29 @@ static void ServiceStorageBootLog(void)
  * (вместо 0.64% при 4 МГц — принципиально улучшает надёжность UART). */
 static void ServiceClock_Config(void)
 {
+  /* ⚠ КРИТИЧНО для выхода из Stop2 (найдено 09.07.2026, разбор кода).
+   * На STM32L4 при STOPWUCK=0 (сброс. дефолт, здесь не менялся) выход из
+   * Stop2 тактируется MSI, а HSI16 аппаратно ВЫКЛЮЧЕН. HAL_RCC_ClockConfig()
+   * с источником HSI сам HSI НЕ включает — он лишь проверяет HSIRDY и при
+   * выключенном HSI возвращает HAL_ERROR (см. stm32l4xx_hal_rcc.c: «HSI is
+   * selected as System Clock Source» → if(HSIRDY==0) return HAL_ERROR).
+   * Итог: после пробуждения из Stop2 ядро попадало сюда → Error_Handler()
+   * (__disable_irq; while(1)) → вечный висяк с выключенными прерываниями.
+   * Снаружи неотличимо от «не проснулось»: PING/0x23 таймаутят, UART мёртв —
+   * ровно симптом «Работа» из session_notes_2026-07-05. «Тест» (0x23) этого
+   * не касается: он в Stop2 не уходит, HSI не гаснет, эта функция после сна
+   * не вызывается. Boot и вход в Service тоже безопасны — там HSI уже включён
+   * SystemClock_Config()/предыдущим кодом.
+   * ФИКС: включаем HSI ЯВНО (OscConfig) до переключения SYSCLK на него.
+   * Пока работаем на MSI (после Stop2) включение HSI допустимо. */
+  RCC_OscInitTypeDef osc = {0};
+  osc.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
+  osc.HSIState            = RCC_HSI_ON;
+  osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  osc.PLL.PLLState        = RCC_PLL_NONE;   /* PLL не трогаем */
+  if (HAL_RCC_OscConfig(&osc) != HAL_OK)
+    Error_Handler();
+
   RCC_ClkInitTypeDef clk = {0};
   clk.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
                      | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;

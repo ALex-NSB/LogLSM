@@ -57,7 +57,21 @@ void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
-
+  /* RTC SMOOTH-CALIBRATION (19.07.2026, по ночному тесту дрейфа 18–19.07):
+   * в ПОКОЕ часы спешат на +8 c за 7 ч 18 м ≈ +305 ppm (кварц LSE/обвязка,
+   * норма ±20–30). Замедляем маскированием импульсов: CALM = 305/0.954 ≈ 320
+   * (окно 32 c). Ставим на КАЖДОМ boot, ДО проверки маркера — применяется и
+   * при живых часах. Уточнение члена — повторным ночным тестом. */
+  HAL_RTCEx_SetSmoothCalib(&hrtc, RTC_SMOOTHCALIB_PERIOD_32SEC,
+                           RTC_SMOOTHCALIB_PLUSPULSES_RESET, 320);
+  /* Достоверность часов (17.07.2026). Backup-домен (RTC_BKP_DR0) гаснет ТОЛЬКО
+   * с питанием. Маркер на месте → питание НЕ терялось (перешивка/watchdog/Stop2-
+   * ресет), часы достоверны — НЕ сбрасываем, выходим. Маркера нет → питание
+   * терялось (ОЗУ+часы потеряны) → даём установить НУЛЕВОЕ время ниже и помечаем
+   * домен живым в RTC_Init 2. Так после полевого разрыва питания часы идут с 0,
+   * а запись продолжается с первой чистой страницы (flashFindWritePos). */
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR0) == 0xBEBE0001u)
+    return;   /* часы достоверны — переинициализация не нужна */
   /* USER CODE END Check_RTC_BKUP */
 
   /** Initialize RTC and set the Time and Date
@@ -81,7 +95,10 @@ void MX_RTC_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN RTC_Init 2 */
-
+  /* Часы только что установлены в 0 (маркера не было = питание терялось).
+   * Помечаем backup-домен живым — на СЛЕДУЮЩИХ сбросах без потери питания
+   * часы сохранятся (проверка в Check_RTC_BKUP выше). (17.07.2026) */
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, 0xBEBE0001u);
   /* USER CODE END RTC_Init 2 */
 
 }

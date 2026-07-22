@@ -242,4 +242,17 @@ void EXTI15_10_IRQHandler(void)
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
 }
 
+/**
+  * @brief RTC wake-up timer interrupt — периодический будильник Stop2 в «Работе»
+  * (11.07.2026). RTC тактируется от LSE/LSI независимо от ядра, поэтому это
+  * самый надёжный источник выхода из Stop2 (в отличие от EXTI13/INT1, который
+  * на стенде не поднимал ядро). HAL_RTCEx_WakeUpTimerIRQHandler сбрасывает
+  * флаг WUTF и pending EXTI20; отдельный callback не нужен — сам факт выхода
+  * из Stop2 обрабатывает main() после WFI. */
+extern RTC_HandleTypeDef hrtc;
+void RTC_WKUP_IRQHandler(void)
+{
+  HAL_RTCEx_WakeUpTimerIRQHandler(&hrtc);
+}
+
 /* USER CODE END 1 */

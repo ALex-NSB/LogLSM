@@ -12,4 +12,9 @@ extern uint8_t flash_powered;
 extern RegistratorData regist;
 extern uint8_t ble_flag;
 
+/* IWDG-сторож (main.c): рефреш живого кода. Зовём в Service() и долгих
+ * операциях (стирание), чтобы не сработал во время легитимной работы. */
+extern volatile uint8_t g_iwdg_on;
+void iwdg_kick(void);
+
 #endif /* GLOBALS_H */

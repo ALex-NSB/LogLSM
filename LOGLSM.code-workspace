@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "Firmware/LOGLSMA"
+		},
+		{
+			"path": "SoftWare/LOGLSMW"
+		}
+	],
+	"settings": {}
+}

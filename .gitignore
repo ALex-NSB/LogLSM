@@ -23,7 +23,10 @@ node_modules/
 
 # === IDE ===
 .vs/
-.vscode/
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/c_cpp_properties.json
 
 # === ОС и редакторы ===
 *.lnk

@@ -46,6 +46,8 @@ void cmdWhoAmI(LtpPacket *wc);                        /* 0x02 */
 
 void cmdFlashReadIDHandler(LtpPacket *wc);            //C0 8D 04 00 00
 void cmdFlashChipEraseHandler(LtpPacket *wc);
+void cmdFlashDataEraseHandler(LtpPacket *wc);         /* 0x2A — «Стереть данные»: чип БЕЗ служебной стр.0 */
+void FlashDataEraseTick(void);                        /* дозавершение 0x2A — дёргать из Service() */
 void cmdFlashPageEraseHandler(LtpPacket *wc);
 void cmdFlashSectorEraseHandler(LtpPacket *wc);       /* 0x1F */
 void cmdFlashWritePageHandler(LtpPacket *wc);         //C0 8D 05 00 00 00 00 00
@@ -79,6 +81,8 @@ void cmdGetDateTime(LtpPacket *wc);
 void cmdStartRegister(LtpPacket *wc);
 void cmdGetStats(LtpPacket *wc);           /* 0x1E */
 void cmdResetTotal(LtpPacket *wc);         /* 0x21 */
+void cmdResetStats(LtpPacket *wc);         /* 0x24 — сброс счётчиков перезапусков */
+void cmdWdgTest(LtpPacket *wc);            /* 0x26 — тест IWDG: отключить рефреш */
 void cmdStopRegister(LtpPacket *wc);       /* 0x22 */
 void cmdStartTest(LtpPacket *wc);          /* 0x23 */
 
@@ -122,7 +126,14 @@ static cmd_callback_t CMD[128] = {
     NULL,                                       /* 0x20  CMD_CYCLE_PUSH — только исходящий */
     cmdResetTotal,                              /* 0x21  CMD_RESET_TOTAL */
     cmdStopRegister,                            /* 0x22  CMD_STOP_REGISTER (03.07.2026) */
-    cmdStartTest                                /* 0x23  CMD_START_TEST — «Тест» без сна (04.07.2026) */
+    cmdStartTest,                               /* 0x23  CMD_START_TEST — «Тест» без сна (04.07.2026) */
+    cmdResetStats,                              /* 0x24  сброс счётчиков перезапусков (журнал iflash) */
+    NULL,                                       /* 0x25  WDG_KICK — только исходящий */
+    cmdWdgTest,                                 /* 0x26  тест IWDG: отключить рефреш → сброс через ~32 c */
+    /* 0x27, 0x28 — зарезервированы под паспорт/флаг активации (см. session_notes
+     * 18.07.2026, §11) — ещё не реализованы, оставлены NULL.
+     * 0x29 — SUBSPEED_PUSH, только исходящий (как CYCLE_PUSH 0x20), NULL. */
+    [0x2A] = cmdFlashDataEraseHandler           /* 0x2A  «Стереть данные» — чип БЕЗ служебной стр.0 (21.07.2026) */
 };
   
 static LtpParser ltp_rx;          /* FSM-парсер входного потока */
@@ -213,9 +224,31 @@ void ComDeInit()
  * накопиться, а не выбрасывается). */
 static void RotationFinishCycle(RegistratorData *r)
 {
-  RTC_GetTimeDate(&r->rot.stopTimeStamp);
+  /* Стоп = время ПОСЛЕДНЕГО детекта вращения (r->rot.lastRotStamp), а НЕ
+   * «сейчас» (11.07.2026). С переходом Poll_Sensor на DRDY гироскопа опрос
+   * стал ~240 мс, и дебаунс ROTATION_DEBOUNCE_N=6 давал ~1.4 c «хвоста» после
+   * реальной остановки мотора → durS раздувался (+2 c, «Общее» уползало
+   * +1/+3/+5/+7). lastRotStamp фиксирует конец РЕАЛЬНОГО вращения, дебаунс в
+   * длительность не входит. */
+  /* Цикл завершился → возвращаемся в Пассивный «со свежими ушами»: троттл в
+   * минимум + pending, чтобы следующая вибрация после паузы поймалась сразу
+   * (12.07.2026). Ставим ДО ветвления — общее для обоих исходов (обрывок < MIN
+   * и полноценный цикл). */
+  r->gyroRecheckSec   = GYRO_RECHECK_MIN_SEC;
+  r->gyroCheckPending = 1;
+  r->rot.stopTimeStamp = r->rot.lastRotStamp;
   uint32_t durS = RTC_SubTimeDateSec(&r->rot.stopTimeStamp,
                                      &r->rot.startTimeStamp);
+  /* САНИТИ-КЛАМП длительности (18.07.2026, 2-я линия после фикса
+   * cmdSetDateTime): цикл «длиннее суток» физически невозможен на стенде —
+   * это порванные штампы (перевод часов посреди цикла и т.п.). Отбрасываем
+   * цикл целиком, чтобы наработку не взорвало (реальный случай: +232 705 ч). */
+  if (durS > 86400u)
+  {
+    r->state = REG_STATE_SLEEP;
+    LSM6DSO_GYRO_Disable(r->lsm);
+    return;
+  }
   /* МЕТОД 2 против дробления (06.07.2026): циклы короче MIN_CYCLE_SEC не пишем
    * во Flash и не пушим — это обрывки (durS=0/1) с разгона стенда, не реальные
    * циклы. Просто возвращаемся в SLEEP и гасим гироскоп. totalSec на них не
@@ -226,14 +259,40 @@ static void RotationFinishCycle(RegistratorData *r)
   {
     r->state = REG_STATE_SLEEP;
     LSM6DSO_GYRO_Disable(r->lsm);
+    if (r->accFs != 2u)   /* авторейндж поднимал шкалу → назад ±2g (Wake-Up) */
+    {
+      r->accFs = 2u;
+      LSM6DSO_ACC_SetFullScale(r->lsm, 2);
+    }
     return;
   }
   r->totalSec += durS;
-  HandleSensorData(r);
+  /* Отчётная скорость = СРЕДНЕЕ по фазе вращения, не пик. Пик (rot.maxRate)
+   * латчит стартовый выброс шаговика (резонанс на малых об/мин) и держит его
+   * весь цикл: в «Тесте» непрерывный опрос его ловит, в «Работе» Stop2 его
+   * просыпает — отсюда была разница «10 задал → 20 измерил». Пик сохраняем
+   * отдельным полем как «Пиковое». Прежний HandleSensorData(r) здесь убран —
+   * он кормил в среднее выборку УЖЕ ПОСЛЕ дебаунса «нет вращения» (тянула вниз). */
+  if (r->rateCount)
+    r->avgRate = (uint16_t)(r->rateSum / (int32_t)r->rateCount);
+  /* Вибрация цикла → maxVibr (mg): ПИК отклонения модуля accel (LSB) ×
+   * чувствительность accel (mg/LSB). Закрывает старую заглушку maxVibro=0.0.
+   * (RMS = √(Σdev²/N)×sens уже считается в vibSumSq/vibCount, но в 24-байт
+   * запись пока нет поля — добавить при расширении формата рядом с maxVibro.) */
+  if (r->vibCount)
+  {
+    /* vibPeak уже в МГ (авторейндж, 18.07.2026). */
+    r->rot.maxVibr = (r->vibPeak > 65535.0f) ? 65535u : (uint16_t)(r->vibPeak + 0.5f);
+  }
   PushCycleRecord(r);
   SaveParamOnEEPROM(r);
   r->state = REG_STATE_SLEEP;
   LSM6DSO_GYRO_Disable(r->lsm);
+  if (r->accFs != 2u)   /* авторейндж поднимал шкалу → назад ±2g (Wake-Up) */
+  {
+    r->accFs = 2u;
+    LSM6DSO_ACC_SetFullScale(r->lsm, 2);
+  }
 }
 
 uint8_t RotationStateStep(RegistratorData *r)
@@ -251,9 +310,36 @@ uint8_t RotationStateStep(RegistratorData *r)
       /* Подтверждено — реальное вращение, не ложное срабатывание
        * акселерометра. Гироскоп остаётся включённым, дальше — обычный
        * старт цикла. */
+      /* СТАРТ цикла = момент ПОДТВЕРЖДЕНИЯ вращения — для ОБОИХ режимов
+       * (12.07.2026, вечер). Раньше только «Тест» метил здесь, а «Работа» — в
+       * момент ПРОБУЖДЕНИЯ (main.c, «нет мёртвого времени»), что резервировало
+       * прогрев+CONFIRM в длительность → +1 c на верхах. По решению: «Работа» =
+       * «Тест» → старт по CONFIRM. Плюс: верхи ровно 0 c (как эталон «Тест»).
+       * Цена (осознанно): на низах честная −задержка (слабая вибрация реально
+       * подтверждается позже прогрева/опросов). Перетирает пре-штамп main.c. */
       RTC_GetTimeDate(&r->rot.startTimeStamp);
+      r->rot.lastRotStamp = r->rot.startTimeStamp;
       r->rot.maxRate = r->rot.maxVibr = 0;
+      r->rateSum = 0; r->rateCount = 0; r->avgRate = 0;
+      r->rotWarmup = 1;
+      r->vibDc = 0; r->vibDcInit = 0;      /* сброс аккумуляторов вибрации цикла */
+      r->vibPeak = 0; r->vibSumSq = 0; r->vibCount = 0;
+      r->vibLvl = 0; r->vibLvlInit = 0;    /* «уровень» — median-трекер */
+      r->plateauInit = 0; r->subCount = 0; r->plateauChg = 0;  /* детектор полок */
+      r->jerkPeak = 0; r->jerkSumSq = 0; r->prevAmagInit = 0;  /* канал 2 (jerk) */
       r->noDetectCount = 0;
+      r->idleChecks = 0;  /* активность подтверждена — счётчик покоя обнуляем */
+      r->deepSleep  = 0;  /* остаёмся в «Проверке» (RTC), не в глубоком сне */
+      r->gyroRecheckSec = GYRO_RECHECK_MIN_SEC;  /* вращение реальное — сбрасываем
+                                                  * эскалацию троттла в минимум */
+      /* АВТОРЕЙНДЖ шкалы accel (18.07.2026): старт цикла всегда с ±2g (макс.
+       * чувствительность, экономичная точка 26 Гц LP не меняется); при клипе
+       * сэмпла vibAccumulate сам удвоит шкалу до ±16g. Вибрация копится в мг.
+       * Возврат ±2g — при уходе в сон (Wake-Up порог завязан на шкалу).
+       * Канал ударов по-настоящему — вариант B (high-g). */
+      r->accFs = 2u;
+      LSM6DSO_ACC_SetFullScale(r->lsm, 2);
+      LSM6DSO_ACC_GetSensitivity(r->lsm, &r->accSensMg);
       HandleSensorData(r);
       r->state = REG_STATE_ROTATING;
     }
@@ -262,9 +348,35 @@ uint8_t RotationStateStep(RegistratorData *r)
       r->confirmPolls++;
       if (r->confirmPolls >= CONFIRM_WINDOW_POLLS)
       {
-        /* Окно истекло без подтверждения — ложное срабатывание
-         * (удар/тряска/наклон, не вращение). Гасим гироскоп. */
+        /* Окно истекло без подтверждения — вращения нет (тряска/пусто).
+         * Гасим гироскоп. 3-уровневый автомат (11.07.2026): считаем пустые
+         * проверки; после IDLE_CHECKS_TO_DEEP подряд уходим в ГЛУБОКИЙ СОН
+         * (deepSleep=1 → main.c армит accel-wake без RTC), чтобы не опрашивать
+         * в покое. */
         LSM6DSO_GYRO_Disable(r->lsm);
+        if (r->idleChecks < 0xFFu) r->idleChecks++;
+        /* Порог ухода в глубокий сон: с кабелем — большой (сервисное окно,
+         * достижимы по LTP для Flash-scan/стопа), без кабеля — быстрый сон
+         * (автономность в поле). См. IDLE_CHECKS_TO_DEEP_CABLE в Data.h. */
+        uint8_t idleLim = wkup1_pin_set() ? IDLE_CHECKS_TO_DEEP_CABLE
+                                          : IDLE_CHECKS_TO_DEEP;
+        if (r->idleChecks >= idleLim)
+        {
+          r->deepSleep = 1;
+          /* Целая ПРОВЕРКА-сессия не нашла вращения (устойчивое «нет») —
+           * ЭСКАЛИРУЕМ интервал гироскоп-перепроверки (удвоение до CAP), чтобы на
+           * упорной вибрации без вращения повторные входы в Активный редели → ток
+           * ограничен. Эскалируем ЗДЕСЬ, а НЕ на каждый промах CONFIRM: иначе
+           * маргинальный низкооборотный СТАРТ (первые опросы гироскопа ещё ниже
+           * порога) наказывался бы ростом интервала и срезал цикл (был −8 c на
+           * 7 об/мин). Сброс в MIN — при подтверждённом вращении и после цикла. */
+          if (r->gyroRecheckSec < GYRO_RECHECK_MAX_SEC)
+          {
+            uint32_t nx = (uint32_t)r->gyroRecheckSec << 1;
+            r->gyroRecheckSec = (nx > GYRO_RECHECK_MAX_SEC) ? GYRO_RECHECK_MAX_SEC
+                                                            : (uint16_t)nx;
+          }
+        }
         r->state = REG_STATE_SLEEP;
       }
     }
@@ -275,6 +387,7 @@ uint8_t RotationStateStep(RegistratorData *r)
     if (RotationDetected(r))
     {
       r->noDetectCount = 0;
+      RTC_GetTimeDate(&r->rot.lastRotStamp);   /* конец цикла = этот детект */
       HandleSensorData(r);
     }
     else
@@ -360,7 +473,11 @@ void Service(RegistratorData *r)
 
   while(!QUIT)
   {
+    iwdg_kick();   /* рефреш сторожа в сервисном цикле; kick-метку 0x25 в
+                    * Сервисе НЕ шлём (18.07.2026) — только «Работа», реальные
+                    * RTC-глажения (PushWdgKick из main.c после пробуждения). */
     ComPoll();
+    FlashDataEraseTick();   /* дозавершение «Стереть данные» (0x2A), см. выше */
 
     if (!wkup1_pin_set())
     {
@@ -387,8 +504,30 @@ void Service(RegistratorData *r)
  *   [0..5]   start_ts    : RTC_DateTime (year,month,day,hour,min,sec)
  *   [6..9]   duration_s  : uint32  — длительность цикла, секунды
  *   [10..13] total_s     : uint32  — суммарная наработка, секунды
- *   [14..15] max_rpm     : uint16  — макс. скорость, об/мин
+ *   [14..15] avg_rpm     : uint16  — СРЕДНЯЯ скорость за цикл, об/мин («Скорость»)
  */
+/* Kick-метка 0x25 из «РАБОТЫ» (18.07.2026): зовётся из main.c при каждом
+ * RTC-пробуждении (глажение IWDG). Шлём ТОЛЬКО при кабеле (WKUP1=1) — LOGLSMW
+ * моргает строкой «по таймеру». Без кабеля — молчим (эфир пустой, ток целее). */
+void PushWdgKick(void)
+{
+  /* Троттл 20 c (18.07.2026): метка не чаще раза в 20 c — LOGLSMW вспыхивает
+   * «по таймеру» на ~2 c раз в 20, а не мигает ежесекундно. Общий для Сервиса
+   * и «Работы». По RTC-календарю (идёт всегда). */
+  static RTC_DateTime s_lastKick;
+  static uint8_t      s_lastKickValid = 0;
+  if (!wkup1_pin_set())
+    return;
+  RTC_DateTime now;
+  RTC_GetTimeDate(&now);
+  if (s_lastKickValid && RTC_SubTimeDateSec(&now, &s_lastKick) < 20u)
+    return;
+  s_lastKick      = now;
+  s_lastKickValid = 1;
+  uint8_t z = 0;
+  sendPacket(LTP_DEV_ADDRESS, 0x25, &z, 1);
+}
+
 void PushCycleRecord(RegistratorData *r)
 {
   /* 02.07.2026: проверка WKUP1 возвращена — теперь функция вызывается НЕ
@@ -405,15 +544,47 @@ void PushCycleRecord(RegistratorData *r)
 
   uint32_t duration_s = RTC_SubTimeDateSec(&r->rot.stopTimeStamp,
                                            &r->rot.startTimeStamp);
-  uint16_t max_rpm    = (uint16_t)r->rot.maxRate;
+  uint16_t avg_rpm  = r->avgRate;        /* [14..15] СРЕДНЕЕ — отчётная «Скорость» */
+  /* Расширение пуша (18.07.2026, живые «Данные» во время «Работы»): в ХВОСТ
+   * добавлены [16..17] max_rpm, [18..19] vib1_peak мг, [20..21] vib2_peak мг —
+   * LOGLSMW дописывает цикл в графики дашборда сразу, не дожидаясь «Стоп»
+   * (журнал во сне не читается). Старый разбор (16 байт) не ломается. */
+  uint16_t max_rpm  = r->rot.maxRate;
+  uint16_t v1p = (r->vibPeak  > 65535.0f) ? 65535u : (uint16_t)(r->vibPeak  + 0.5f);
+  uint16_t v2p = (r->jerkPeak > 65535.0f) ? 65535u : (uint16_t)(r->jerkPeak + 0.5f);
+  /* [22..23] vib1_RMS мг (18→19.07): «уровень» на графике = RMS (не реагирует
+   * на одиночный удар), «пики» = v1p. RMS = sqrt(sumSq/count). */
+  float v1rms_f = r->vibLvl;   /* «уровень» = робастная медиана |dev| (19.07.2026) */
+  uint16_t v1rms = (v1rms_f > 65535.0f) ? 65535u : (uint16_t)(v1rms_f + 0.5f);
 
-  uint8_t payload[16];
+  uint8_t payload[24];
   memcpy(payload,      &r->rot.startTimeStamp, sizeof(RTC_DateTime)); /* 6 */
   memcpy(payload + 6,  &duration_s,            4);
   memcpy(payload + 10, &r->totalSec,           4);
-  memcpy(payload + 14, &max_rpm,               2);
+  memcpy(payload + 14, &avg_rpm,               2);
+  memcpy(payload + 16, &max_rpm,               2);
+  memcpy(payload + 18, &v1p,                   2);
+  memcpy(payload + 20, &v2p,                   2);
+  memcpy(payload + 22, &v1rms,                 2);
 
   sendPacket(LTP_DEV_ADDRESS, 0x20, payload, sizeof(payload));
+
+  /* СУБ-СКОРОСТИ ПОЛОК (0x29, 19.07.2026) — ТОЛЬКО в сервис/тест (мы уже под
+   * гейтом wkup1 выше), в Flash НЕ уходят. Финализируем последнюю полку и шлём
+   * список максимумов полок: LOGLSMW разложит по заданным скоростям цикла.
+   * Формат: [count][rpm0_LE..rpmN_LE]. Шлём при >1 полке (одиночная скорость —
+   * ничего нового). */
+  if (r->plateauInit && r->subCount < PLATEAU_MAX_N)
+    r->subMax[r->subCount++] = (r->plateauMax > 65535) ? 65535u
+                                : (uint16_t)r->plateauMax;
+  if (r->subCount > 1u)
+  {
+    uint8_t sp[1 + 2 * PLATEAU_MAX_N];
+    sp[0] = r->subCount;
+    for (uint8_t i = 0; i < r->subCount; i++)
+      memcpy(sp + 1 + 2 * i, &r->subMax[i], 2);
+    sendPacket(LTP_DEV_ADDRESS, 0x29, sp, (uint16_t)(1u + 2u * r->subCount));
+  }
 }
 
 void ComPoll()
@@ -451,11 +622,41 @@ void cmdPing(LtpPacket *wc)
   sendPacket(wc->addr, wc->cmd, NULL, 0);
 }
 
+/* ⬇⬇⬇ ВЕРСИЯ ПРОШИВКИ — ПРОСТО ЧИСЛА, МЕНЯЮ РУКАМИ ⬇⬇⬇
+ * Формат ГГ ММ ДД ЧЧ ММ. Claude ставит сюда текущее время каждый раз, когда
+ * заканчивает правку прошивки. Никакого CMake/__TIME__/автогенерации.
+ * Прошил → увидел эти числа в «Данные» → значит в контроллере именно эта
+ * правка. Не совпало — прошит старый ELF (пересобери и прошей заново). */
+#define FW_YY  26   /* год  */
+#define FW_MM   7   /* мес  */
+#define FW_DD  19   /* число*/
+#define FW_HH  18   /* часы */
+#define FW_MI  58   /* мин  */
+
+/* ИМЯ УСТРОЙСТВА — хранится в КОНТРОЛЛЕРЕ (паспорт; позже перенесём во
+ * внутреннюю Flash STM32 как настраиваемый серийник/вариант). LOGLSMW просто
+ * показывает, что пришло. Дизайнерский вид: LogLSMA (2 строчные «og»).
+ * (финальная проверка индикатора — метка пересборки #2) */
+#define DEV_NAME  "LogLSMa"   /* финальная «a» СТРОЧНАЯ — разделитель перед модулями: LogLSMaE00 */
+
 void cmdWhoAmI(LtpPacket *wc)
 {
   uint8_t id = 0;
   if(0 == LSM6DSO_ReadID(&lsm, &id))
-    sendPacket(wc->addr, wc->cmd, &id, 1);
+  {
+    /* Ответ: [0]=WHO_AM_I датчика, [1..5]=версия=время сборки ГГ ММ ДД ЧЧ ММ,
+     * [6..]=имя устройства (ASCII, с завершающим нулём). Старый разбор
+     * (только байт 0) не ломается — лишние байты игнорируются. */
+    uint8_t resp[6 + sizeof(DEV_NAME)];
+    resp[0] = id;
+    resp[1] = FW_YY;
+    resp[2] = FW_MM;
+    resp[3] = FW_DD;
+    resp[4] = FW_HH;
+    resp[5] = FW_MI;
+    memcpy(&resp[6], DEV_NAME, sizeof(DEV_NAME));   /* с '\0' */
+    sendPacket(wc->addr, wc->cmd, resp, sizeof(resp));
+  }
   else
     sendError(wc->addr, wc->cmd, LTP_ERR_IMU);
 }
@@ -478,7 +679,67 @@ void cmdStartRegister(LtpPacket *wc)
     s_reg->state            = REG_STATE_SLEEP;
     s_reg->confirmPolls     = 0;
     s_reg->noDetectCount    = 0;
+    /* Старт СРАЗУ в глубоком сне (deepSleep=1). История 12.07.2026: сначала думали,
+     * что deepSleep=1 теряет 1-й цикл — но диагностика на ПОСТОЯННОЙ скорости
+     * показала, что «нет ответа» на первых циклах давала СЛАБАЯ ВИБРАЦИЯ низов
+     * (5–7 об/мин на тихом стенде), а НЕ позиция и НЕ холодный accel-wake: все
+     * прежние прогоны были по ВОЗРАСТАНИЮ, где 1-я позиция = самая медленная =
+     * самая слабая вибрация (два фактора совпали). На 10/30 об/мин 1-й цикл
+     * приходит всегда. При deepSleep=0 он шёл с −2 c (ждал RTC-тик «Проверки»);
+     * deepSleep=1 будит движением в момент реального пуска → 1-й цикл в 0 c, как
+     * циклы 2+. Если на холодном старте accel-wake реально не выстрелит — вернуть 0. */
+    s_reg->deepSleep        = 1;
+    s_reg->idleChecks       = 0;
+    /* Гироскоп-троттл (12.07.2026): стартуем с минимального интервала, первый
+     * детект — БЕЗ троттла (pending=1), чтобы вибрация после команды поймалась
+     * сразу. lastGyroCheck засеваем «сейчас» (валидная метка до первой проверки). */
+    s_reg->gyroRecheckSec   = GYRO_RECHECK_MIN_SEC;
+    s_reg->gyroCheckPending = 1;
+    RTC_GetTimeDate(&s_reg->lastGyroCheck);
   }
+
+  /* ⚠ Wake-Up ПОКОМАНДНО (11.07.2026, ит. 2). Пробуждение по движению ИЗ Stop2
+   * подтверждено (05.07) ТОЛЬКО на конфигурации, которую ставит сам
+   * Enable_Wake_Up_Detection на 417 Гц HP: не только ODR, но и slope-фильтр,
+   * WAKE_DUR/threshold и маршрут wake_up→INT1. 104 Гц LP (загрузочный дефолт
+   * main.c) будит детект «Теста» на ходу, но НЕ поднимает ядро из Stop2 —
+   * «Работа» не просыпалась (нет ни одного цикла даже во Flash).
+   * Ит. 1 (просто SetOutputDataRate 417 HP) НЕ помогла — одного ODR мало, надо
+   * ПЕРЕАРМИРОВАТЬ весь детект. Поэтому здесь заново вызываем
+   * Enable_Wake_Up_Detection (переустановит и slope-фильтр, и INT1-маршрут),
+   * затем явно пиним 417 HP. «Тест» остаётся на 104 LP (cmdStartTest).
+   * Ток 417 HP (~170 мкА) — оптимизацию (208/104/52 LP) откладываем. См.
+   * session_notes_2026-07-11_work_mode_bench.md. */
+  LSM6DSO_ACC_Enable_Wake_Up_Detection(&lsm, LSM6DSO_INT1_PIN);
+  /* Порог Wake-Up (12.07.2026). Дефолт драйвера WK_THS=2 (≈62 мг при ±2g) слишком
+   * груб для медленного вращения на 1.6 Гц LP: на 6–7 об/мин детект срабатывал
+   * поздно (записалось 2–3 с из 10). Снижаем до 1 (≈31 мг, ×2 чувствительность) —
+   * раньше срабатывает → и порог по об/мин ниже, и меньше мёртвого времени.
+   * Ложные пробуждения безопасны: фаза «Проверка» отсеет их гироскопом.
+   * duration=0 (мин.) оставляем — время накопления не нужно. Если 1 даст ложняки
+   * от фона стенда/вибрации — вернуть 2 или поднять duration. */
+  LSM6DSO_ACC_Set_Wake_Up_Threshold(&lsm, 1);
+  LSM6DSO_ACC_Set_Wake_Up_Duration(&lsm, 0);
+  /* ODR accel под Wake-Up глубокого сна — ТОК (спуск по лесенке LP, 11–12.07.2026).
+   * 417 HP=~170 мкА → 104 LP=~15–17 мкА (×10) → 52 LP=~9.5 мкА (подтв. на стенде
+   * 12.07: 10/42/74 об/мин просыпаются) → ПРОБУЕМ 26 LP=~7 мкА. Poll_Sensor ждёт
+   * DRDY ГИРОСКОПА → ODR accel на измерение НЕ влияет, нужен лишь для slope-детекта
+   * Wake-Up (выборка раз в 1/ODR: 26 Гц ≈ 38 мс). Спин не грозит (EXTI13 армится
+   * только в глубоком сне, мотор стоит). ТЕСТ: циклы после пауз/на холодном старте
+   * ловятся → рабочая точка; теряются → шаг назад по лесенке.
+   * Спуск 12.07: 104→52 (10/42/74 ОК)→26 (времена в нулях, ОК)→1.6 LP=4.5 мкА.
+   * 1.6 на 5–7 об/мин теряет циклы, НО это НИЖЕ целевого минимума 10 об/мин —
+   * проверяем 1.6 на рабочем диапазоне (10+). Рычаг чувствительности, если надо
+   * вытянуть 1.6 на низах — порог Wake-Up (WK_THS/duration), см. ниже. 26 LP=7 мкА
+   * — подтверждённый безопасный fallback, если 1.6 не пройдёт и на 10+. */
+  /* 12.07.2026: A/B на стенде показал, что 1.6 Гц LP пропускает старт на 8 об/мин
+   * (тихий стенд), тогда как «Тест» на 104 Гц LP тот же 8 об/мин ловит +0.0%.
+   * Причина — редкая выборка slope-детекта (1.6 Гц ≈ раз в 625 мс проскакивает
+   * короткую слабую вибрацию старта). Поднимаем ODR с самого низкого шага лесенки:
+   * 26 Гц LP (~7 мкА, выборка ~38 мс) — задокументированный безопасный fallback.
+   * Если 26 всё ещё маргинально ловит низы 8–10 — следующий шаг 52 (~9.5) / 104 (~17). */
+  LSM6DSO_ACC_SetOutputDataRate_With_Mode(&lsm, 26.0f,
+                                          LSM6DSO_ACC_LOW_POWER_NORMAL_MODE);
 
   QUIT = 1;
 }
@@ -503,6 +764,13 @@ void cmdStartTest(LtpPacket *wc)
     s_reg->confirmPolls     = 0;
     s_reg->noDetectCount    = 0;
   }
+
+  /* ODR акселерометра под «Тест» — 104 Гц LP (см. покомандный выбор в
+   * cmdStartRegister). Детект по WUF2 на ходу работает на 104 LP; 417 HP,
+   * наоборот, ломает детект в run-режиме. Ставим явно на случай, если
+   * предыдущая «Работа» подняла ODR до 417 HP. */
+  LSM6DSO_ACC_SetOutputDataRate_With_Mode(&lsm, 104.0f,
+                                          LSM6DSO_ACC_LOW_POWER_NORMAL_MODE);
 
   /* Чистый «взвод»: сбрасываем накопленные фронты, чтобы стартовать с
    * ожидания СВЕЖЕГО фронта INT1/WKUP2, а не сработать на старый флаг. */
@@ -543,6 +811,12 @@ void cmdStopRegister(LtpPacket *wc)
     s_reg->testNoSleep      = 0;   /* общий стоп и для «Теста», и для «Работы» */
   }
 
+  /* Возврат ODR акселерометра на низкопотребляющий дефолт 104 LP после
+   * «Работы» (та поднимала до 417 HP ради пробуждения из Stop2) — чтобы в
+   * простое/сервисе не жечь ~170 мкА. Для «Теста» это и так было 104 LP. */
+  LSM6DSO_ACC_SetOutputDataRate_With_Mode(&lsm, 104.0f,
+                                          LSM6DSO_ACC_LOW_POWER_NORMAL_MODE);
+
   sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
 }
 
@@ -561,13 +835,51 @@ void cmdResetTotal(LtpPacket *wc)
   sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
 }
 
+/* 0x24 — сброс счётчиков перезапусков: стираем журнал событий внутренней Flash
+ * (iflash, стр.124–127) → «по питанию»/«по таймеру» в GET_STATS обнуляются.
+ * Для чистой полевой статистики перед выездом. (17.07.2026) */
+void cmdResetStats(LtpPacket *wc)
+{
+  iflash_journal_reset();
+  uint8_t err = er_none;
+  sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
+}
+
+/* 0x26 — ТЕСТ IWDG (18.07.2026): отключаем рефреш сторожа (g_iwdg_on=0) →
+ * через ~32 c IWDG бьёт сброс → журнал ловит IWDGRST → счётчик «по таймеру» +1.
+ * После сброса рефреш снова включён (boot). Только для проверки сторожа. */
+void cmdWdgTest(LtpPacket *wc)
+{
+  g_iwdg_on = 0;
+  uint8_t err = er_none;
+  sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
+}
+
 void cmdSetDateTime(LtpPacket *wc)
 {
   uint8_t err = er_badarg;
   if(wc->n == sizeof(RTC_DateTime))
   {
     RTC_DateTime *dt = (RTC_DateTime*)wc->data;
-    RTC_SetTimeDate(dt);
+    /* Перевод часов ВО ВРЕМЯ идущего цикла (18.07.2026): штампы цикла остаются
+     * в СТАРОЙ шкале → длительность рвётся (реальный случай: старт при часах
+     * 2000-го после потери питания, ⌚ в бодрой фазе, стоп в 2026-м →
+     * durS ≈ 26 лет → наработка 232 705 ч). Пересаживаем все живые штампы на
+     * дельту нового времени. */
+    if (s_reg && s_reg->state != REG_STATE_SLEEP)
+    {
+      RTC_DateTime oldNow;
+      RTC_GetTimeDate(&oldNow);
+      uint32_t elapStart = RTC_SubTimeDateSec(&oldNow, &s_reg->rot.startTimeStamp);
+      uint32_t elapLast  = RTC_SubTimeDateSec(&oldNow, &s_reg->rot.lastRotStamp);
+      uint32_t elapGyro  = RTC_SubTimeDateSec(&oldNow, &s_reg->lastGyroCheck);
+      RTC_SetTimeDate(dt);
+      RtcSubSecFrom(dt, elapStart, &s_reg->rot.startTimeStamp);
+      RtcSubSecFrom(dt, elapLast,  &s_reg->rot.lastRotStamp);
+      RtcSubSecFrom(dt, elapGyro,  &s_reg->lastGyroCheck);
+    }
+    else
+      RTC_SetTimeDate(dt);
     err = er_none;
     
     /*RTC_DateTime dt2;
@@ -823,7 +1135,10 @@ void cmdGetStats(LtpPacket *wc)
   memcpy(&ans[13], &val32, 4);
 
   /* Реальные счётчики рестартов из журнала внутренней Flash (06.07.2026,
-   * раньше были жёсткие нули). Переживают потерю питания (iflash, Page A). */
+   * раньше были жёсткие нули). Переживают потерю питания (iflash, Page A).
+   * (Диагностику Stop2 через это поле откатили 11.07: питание стирает и ОЗУ, и
+   * backup, поэтому счётчик, читаемый после передёргивания, бесполезен —
+   * заменён на живую метку 0x7E при выходе из Stop2, см. main.c.) */
   val16 = iflash_journal_count(EVT_WATCHDOG);  /* restarts_timer (зависоны, сторож) */
   memcpy(&ans[17], &val16, 2);
 
@@ -993,6 +1308,54 @@ void cmdFlashChipEraseHandler(LtpPacket *wc)
     s_reg->totalSec = 0u;
 
   sendPacket(wc->addr, wc->cmd, &f, 1);
+}
+
+/* 0x2A — «Стереть данные» (21.07.2026, по замечанию: стр.0 — служебная
+ * информация/паспорт, реальные данные регистратора со стр.1, обычное
+ * «Стереть» 0x05 стирает и её).
+ *
+ * P25Q не умеет стирать «весь чип, кроме одной страницы» одной командой —
+ * bulk-erase (0x60) стирает всё. Секторное/постраничное стирание вручную по
+ * циклу заняло бы значительно дольше (4096 секторов) — неприемлемо.
+ * Поэтому: читаем стр.0 в буфер ДО стирания, запускаем обычный bulk-erase (тот
+ * же, что и 0x05), и ПОСЛЕ того как чип освободится (WIP=0) — пишем стр.0
+ * назад. Само стирание асинхронное (Wait_Busy тут не зовём, см. EraseChip),
+ * поэтому запись стр.0 нельзя делать сразу — чип ещё занят bulk-erase, любая
+ * PROGRAM PAGE в это время не пройдёт. Дозавершение — FlashDataEraseTick(),
+ * дёргается из главного цикла Service() (while(!QUIT), после ComPoll()). */
+static uint8_t          s_page0Backup[P25Q_PAGE_SIZE];
+static volatile uint8_t s_dataEraseArmed = 0;
+
+void cmdFlashDataEraseHandler(LtpPacket *wc)
+{
+  uint8_t f = er_none;
+
+  P25Qx_QPI_Read(&flash, 0, P25Q_PAGE_SIZE, s_page0Backup);
+
+  P25Qx_QPI_EraseChip(&flash);
+  s_dataEraseArmed = 1;   /* дозавершение — см. FlashDataEraseTick() */
+
+  /* Как и при обычном стирании чипа — lifetime-наработка обнуляется. */
+  if (s_reg)
+    s_reg->totalSec = 0u;
+
+  sendPacket(wc->addr, wc->cmd, &f, 1);
+}
+
+/* Вызывать из Service() на каждом обороте главного цикла (после ComPoll()).
+ * Пока чип ещё занят стиранием — просто выходит сразу (дешёвая проверка флага). */
+void FlashDataEraseTick(void)
+{
+  if (!s_dataEraseArmed)
+    return;
+
+  union StatusRegBits st;
+  st.reg[1] = P25Qx_ReadSR(&flash, 1);
+  if (st.flag.WIP)
+    return;   /* чип ещё стирается — проверим на следующем обороте */
+
+  P25Qx_QPI_ProgramPage(&flash, 0, s_page0Backup, P25Q_PAGE_SIZE);
+  s_dataEraseArmed = 0;
 }
 
 void cmdFlashReadHandler(LtpPacket *wc)

@@ -1,0 +1,22 @@
+.claude/ 
+# Кэш и сессии ИИ-агентов (Claude, Cascade и др.)
+.claude/
+.anthropic/
+*.log
+
+# Окружение Node.js (если есть)
+node_modules/
+npm-debug.log*
+
+# Окружение Python (если есть)
+__pycache__/
+*.pyc
+.venv/
+venv/
+ENV/
+
+# Специфичные файлы систем и редакторов
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/.qtcreator/  build/ 
