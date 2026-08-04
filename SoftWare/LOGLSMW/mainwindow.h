@@ -652,7 +652,13 @@ private:
         int   phase   = 0;          // 0 = разгон/устаканивание, 1 = измерение
         int   phaseMs = 0;          // накоплено мс в текущей фазе
         QVector<double> samples;    // выборки сырой об/мин за окно измерения (усечённое среднее)
-        QVector<double> targets;    // заданные скорости (столбец 0), по строкам
+        QVector<double> targets;    // заданные скорости ОТМЕЧЕННЫХ строк (параллельно rows)
+        QVector<int>    rows;       // индексы строк таблицы (только отмеченные галкой)
+        int    cyclesTotal = 1;     // сколько раз пройти весь набор
+        int    cycle = 0;           // текущий цикл (0-индекс)
+        int    settleMs = 4500;     // разгон/пауза на ступени (из UI)
+        int    measMs   = 5000;     // окно измерения на ступени (из UI)
+        bool   autoUpdate = false;  // писать коэффициенты в прибор после каждого цикла
     } m_speedCal;
     QTimer m_speedCalTimer;
     void   speedCalAutoStart();
@@ -661,6 +667,11 @@ private:
     void   speedCalAutoAccum(const QByteArray &payload);   // накопить rpm из GET_AXES_RAW
     void   speedCalHighlightRow(int row, bool on, int phase); // подсветка текущей ступени
     void   speedCalClearHighlight();
+    bool   speedCalWrite(bool confirm, bool reread = true);   // записать коэффициенты измеренных узлов (0x32); reread=false — без переформатирующего чтения (в прогоне)
+    void   rtcCalUpdateButtons(int state);   // 0 idle / 1 идёт выдержка / 2 расчёт готов — цвет кнопок RTC
+    QTimer m_rtcApplyBlinkTimer;             // моргание «Применить» в состоянии «расчёт готов»
+    bool   m_rtcApplyBlinkOn = false;
+    int    m_rtcCalUiState = 0;              // 0 idle / 1 выдержка / 2 готово — защита от затирания периодикой
 
     void   setupMonitor();
     void   monStart();

@@ -73,6 +73,7 @@ constexpr quint32 TagSpeedTest = 13; // ответ замера скорости
 constexpr quint32 TagActDump   = 14; // постраничное чтение образа для сохранения на диск в шаге 1 активации (27.07.2026)
 constexpr quint32 TagRtcCalStop = 15; // контрольное чтение времени при «Стоп» грубой калибровки RTC (03.08.2026)
 constexpr quint32 TagSpeedCal   = 16; // авто-калибровка скорости: опрос гироскопа на каждой ступени (03.08.2026)
+constexpr quint32 TagSyncCheck  = 17; // проверка опорной точки синхро на устройстве (backup) — состояние кнопок RTC (04.08.2026)
 
 // Чувствительность LSM6DSO по факт. полной шкале (ACC_GET_FS/GYRO_GET_FS,
 // см. devicecontroller.h) — значения из лежащей в основе ST-библиотеки
@@ -630,8 +631,13 @@ void MainWindow::setupCore()
             p.append(char(now.time().minute()));
             p.append(char(now.time().second()));
             requestCmd(LtpCmd::SET_DATETIME, p);
+            // Опорная точка синхро на устройстве (backup): t0 = это же время (unix).
+            // Любая синхронизация задаёт точку → потом «Стоп» посчитает дрейф от неё.
+            { QByteArray sr; quint32 ts = quint32(now.toSecsSinceEpoch());
+              for (int i = 0; i < 4; ++i) sr.append(char((ts >> (8*i)) & 0xFF));
+              requestCmd(LtpCmd::SYNC_REF_SET, sr); }
             requestCmd(LtpCmd::GET_DATETIME, {}, TagSyncTime);   // контрольное чтение
-            appendLog(QStringLiteral("[TX] SET_DATETIME ← время ПК (по границе секунды)"));
+            appendLog(QStringLiteral("[TX] SET_DATETIME ← время ПК (по границе секунды) + опорная точка"));
         });
     });
     connect(ui->btnImuRaw, &QPushButton::clicked, this, [this] {
@@ -671,10 +677,6 @@ void MainWindow::setupCore()
     // образа по LTP + запись во внутр. Flash) ПОКА НЕ реализован. Сейчас работает
     // только выбор файла; заливка — следующий шаг (bootloader-раздел + протокол).
     // «Часы RTC» («Калибровка») — чтение и синхронизация по границе секунды.
-    connect(ui->btnRtcRead, &QPushButton::clicked, this, [this] {
-        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-        requestCmd(LtpCmd::GET_DATETIME, {}, TagSyncTime);
-    });
     connect(ui->btnRtcSync, &QPushButton::clicked, this, [this] {
         if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
         const int msToEdge = 1000 - QTime::currentTime().msec();
@@ -711,15 +713,29 @@ void MainWindow::setupCore()
             m_rtcCalT0 = QDateTime(now.date(), QTime(now.time().hour(),
                                    now.time().minute(), now.time().second()));  // на границе секунды
             m_rtcCalActive = true;
-            ui->btnRtcCalApply->setEnabled(false);
+            // Опорная точка синхро НА УСТРОЙСТВЕ (backup-регистр): t0 = момент синхро
+            // (unix). Переживает сон/перезапуск/смену ПК; сбросится только с
+            // питанием (тогда и часы сбились → калибровать нельзя, контроль в 0x38).
+            { QByteArray sr; quint32 ts = quint32(m_rtcCalT0.toSecsSinceEpoch());
+              for (int i = 0; i < 4; ++i) sr.append(char((ts >> (8*i)) & 0xFF));
+              requestCmd(LtpCmd::SYNC_REF_SET, sr, TagManual); }
+            // Сохраняем в настройки — «Старт» переживёт перезапуск W (выдержка
+            // может длиться ночь/сутки, приложение за это время закрывают).
+            QSettings st(kOrg, kApp);
+            st.setValue(QStringLiteral("rtcCal/active"), true);
+            st.setValue(QStringLiteral("rtcCal/t0"), m_rtcCalT0);
+            rtcCalUpdateButtons(1);   // «Старт» красная — идёт отсчёт
             ui->lblRtcCalStatus->setText(QStringLiteral("Идёт выдержка… нажмите «Стоп» позже (дольше — точнее)"));
             appendLog(QStringLiteral("[RTC-калибровка] старт, часы синхронизированы"));
         });
     });
     connect(ui->btnRtcCalStop, &QPushButton::clicked, this, [this] {
-        if (!m_rtcCalActive) { appendLog(QStringLiteral("⚠ Калибровка не запущена")); return; }
         if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-        requestCmd(LtpCmd::GET_DATETIME, {}, TagRtcCalStop);   // расчёт в обработчике GET_DATETIME
+        // Сначала запрашиваем опорную точку с УСТРОЙСТВА (backup-регистр). Если
+        // валидна — t0 берём оттуда (переживает перезапуск/смену ПК). Если backup
+        // сброшен (часы сбились) — валидность 0, и расчёт откажем. Ответ 0x38
+        // разбирается в onResponse (тег TagRtcCalStop) → там же цепочка к расчёту.
+        requestCmd(LtpCmd::SYNC_REF_GET, {}, TagRtcCalStop);
     });
     // «Стоп от активации» (task #15): t0 = момент активации (ts_activation из
     // GET_STATS). При активации волна синхронизирует часы и пишет ts_activation =
@@ -747,8 +763,29 @@ void MainWindow::setupCore()
         requestCmd(LtpCmd::RTC_CALIB_SET, b, TagManual);
         appendLog(QStringLiteral("[TX] RTC_CALIB_SET %1 ppm").arg(m_rtcCalNewPpm, 0, 'f', 1));
         requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);   // контроль
-        ui->btnRtcCalApply->setEnabled(false);
+        rtcCalUpdateButtons(0);   // применено → всё в исходное
+        ui->lblRtcCalStatus->setText(QStringLiteral("Поправка применена. Для контроля прогоните ещё одну выдержку."));
     });
+    // Моргание «Применить» в состоянии «расчёт готов» (переключаем фон).
+    connect(&m_rtcApplyBlinkTimer, &QTimer::timeout, this, [this] {
+        m_rtcApplyBlinkOn = !m_rtcApplyBlinkOn;
+        ui->btnRtcCalApply->setStyleSheet(m_rtcApplyBlinkOn
+            ? QStringLiteral("background:#9A7B1A;color:#F5F4F0;") : QString());
+    });
+    // Восстановление незакрытой выдержки: «Старт» мог быть в прошлой сессии W
+    // (приложение закрывали за ночь). t0 зафиксирован в настройках → продолжаем.
+    {
+        QSettings st(kOrg, kApp);
+        if (st.value(QStringLiteral("rtcCal/active"), false).toBool()) {
+            m_rtcCalT0 = st.value(QStringLiteral("rtcCal/t0")).toDateTime();
+            if (m_rtcCalT0.isValid()) {
+                m_rtcCalActive = true;
+                rtcCalUpdateButtons(1);   // «Старт» красная — выдержка продолжается
+                ui->lblRtcCalStatus->setText(QStringLiteral("Выдержка продолжается с %1 — нажмите «Стоп»")
+                    .arg(m_rtcCalT0.toString(QStringLiteral("yy.MM.dd HH:mm:ss"))));
+            }
+        }
+    }
 
     // «Калибровка скорости» («Калибровка») — чтение/дефолт/запись таблицы узлов.
     connect(ui->btnSpeedCalRead, &QPushButton::clicked, this, [this] {
@@ -760,7 +797,7 @@ void MainWindow::setupCore()
         // старта редактирования; на устройство попадёт только по «Записать».
         // Узловые скорости (задано), текущий коэфф = 1 (по умолчанию — без поправки),
         // измерено пусто (заполнит прогон «Калибровать» или ручной ввод).
-        static const double nodes[] = { 50,70,90,115,150,195,245,292,330 };
+        static const double nodes[] = { 10,25,50,70,90,115,150,195,245,292,330 };
         const int nn = int(sizeof(nodes)/sizeof(nodes[0]));
         ui->tblSpeedCal->setRowCount(nn);
         { QSignalBlocker b(ui->tblSpeedCal);
@@ -773,34 +810,7 @@ void MainWindow::setupCore()
         appendLog(QStringLiteral("[Калибровка] шаблон: узлы, текущий=1 (не записано)"));
     });
     connect(ui->btnSpeedCalWrite, &QPushButton::clicked, this, [this] {
-        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-        const int n = ui->tblSpeedCal->rowCount();
-        if (n < 2 || n > 16) { appendLog(QStringLiteral("⚠ Нужно 2–16 узлов")); return; }
-        QByteArray p; p.append(char(n));
-        double prevR = -1e9;
-        for (int i = 0; i < n; ++i) {
-            // На устройство: ключ интерполяции = СЫРАЯ об/мин (измерено/текущий),
-            // коэффициент = НОВЫЙ (кол.4). Прошивка в цикле умножает сырое на этот
-            // коэффициент → получает заданную скорость.
-            auto cell = [this,i](int c){ auto*it=ui->tblSpeedCal->item(i,c); return it?it->text().trimmed():QString(); };
-            bool okM=false, okK=false;
-            const float meas = cell(1).toFloat(&okM);       // измерено
-            const float newk = cell(4).toFloat(&okK);       // новый коэфф
-            float cur = cell(2).toFloat(); if (cur <= 0.f) cur = 1.f;   // текущий (кол.2, дефолт 1)
-            if (!okM || !okK) { appendLog(QStringLiteral("⚠ Строка %1: нет измерения/коэффициента").arg(i+1)); return; }
-            const float r = meas / cur;                     // сырое = измерено / текущий
-            const float k = newk;
-            if (r <= prevR)   { appendLog(QStringLiteral("⚠ скорость должна строго возрастать (строка %1)").arg(i+1)); return; }
-            prevR = r;
-            for (int b=0;b<4;++b) p.append(char((*reinterpret_cast<const quint32*>(&r) >> (8*b)) & 0xFF));
-            for (int b=0;b<4;++b) p.append(char((*reinterpret_cast<const quint32*>(&k) >> (8*b)) & 0xFF));
-        }
-        if (QMessageBox::question(this, QStringLiteral("Запись калибровки"),
-                QStringLiteral("Записать таблицу калибровки скорости во внутреннюю Flash (стр.123)?"))
-            != QMessageBox::Yes) return;
-        requestCmd(LtpCmd::SPEED_CAL_SET, p, TagManual);
-        appendLog(QStringLiteral("[TX] SPEED_CAL_SET: %1 узлов").arg(n));
-        requestCmd(LtpCmd::SPEED_CAL_GET, {}, TagManual);   // контрольное чтение
+        speedCalWrite(true);
     });
     // Ручная правка «Задано»/«Измерено» → пересчёт Δ% и «Коэфф. новый» в строке.
     connect(ui->tblSpeedCal, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
@@ -813,6 +823,13 @@ void MainWindow::setupCore()
         if (m_speedCal.running) speedCalAutoStop(false); else speedCalAutoStart();
     });
     connect(&m_speedCalTimer, &QTimer::timeout, this, &MainWindow::speedCalAutoTick);
+    // Общая галка «Все» — отметить/снять все скорости для прогона калибровки.
+    connect(ui->chkSpeedCalAll, &QCheckBox::clicked, this, [this](bool on) {
+        QSignalBlocker b(ui->tblSpeedCal);
+        for (int r = 0; r < ui->tblSpeedCal->rowCount(); ++r)
+            if (auto *it = ui->tblSpeedCal->item(r, 0))
+                it->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+    });
     // Таблица калибровки: 5 столбцов делят ширину поровну (без горизонтального
     // скролла), без вертикальной нумерации, заголовки — вправо.
     ui->tblSpeedCal->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -1436,6 +1453,7 @@ void MainWindow::setupCore()
         if (m_link->isOpen() && ui->tabsMain->currentWidget() == ui->tabCalibration) {
             m_dev->enqueue(LtpCmd::SPEED_CAL_GET, {}, TagManual);
             m_dev->enqueue(LtpCmd::RTC_CALIB_GET, {}, TagManual);
+            m_dev->enqueue(LtpCmd::SYNC_REF_GET, {}, TagSyncCheck);   // состояние опорной точки → кнопки
         }
         // «FLASH STM»: состояние активации (GET_STATS) + история активаций (0x2E).
         if (m_link->isOpen() && ui->tabsMain->currentWidget() == ui->tabFlashStm) {
@@ -1493,6 +1511,11 @@ void MainWindow::speedCalSetCell(int row, int col, const QString &text, bool edi
     auto *it = new QTableWidgetItem(text);
     it->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
     if (!editable) it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+    if (col == 0) {   // «Задано» — с галкой включения скорости в прогон калибровки
+        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+        auto *old = ui->tblSpeedCal->item(row, 0);   // сохранить прежний выбор строки
+        it->setCheckState(old ? old->checkState() : Qt::Checked);
+    }
     ui->tblSpeedCal->setItem(row, col, it);
 }
 
@@ -1533,9 +1556,43 @@ void MainWindow::speedCalSetRow(int row, double given, double measured, double w
     speedCalRecompute(row);
 }
 
+// Записать коэффициенты ИЗМЕРЕННЫХ узлов на устройство (0x32). confirm=false —
+// без диалога (авто-обновление после цикла). Возврат true при отправке.
+bool MainWindow::speedCalWrite(bool confirm, bool reread)
+{
+    if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return false; }
+    const int rc = ui->tblSpeedCal->rowCount();
+    QByteArray body; int cnt = 0; double prevR = -1e9;
+    for (int i = 0; i < rc; ++i) {
+        auto cell = [this,i](int c){ auto*it=ui->tblSpeedCal->item(i,c); return it?it->text().trimmed():QString(); };
+        const QString mtxt = cell(1);
+        if (mtxt.isEmpty()) continue;                   // не измерена — пропуск
+        bool okM=false, okK=false;
+        const float meas = mtxt.toFloat(&okM);
+        const float newk = cell(4).toFloat(&okK);
+        float cur = cell(2).toFloat(); if (cur <= 0.f) cur = 1.f;
+        if (!okM || !okK) { appendLog(QStringLiteral("⚠ Строка %1: битые измерение/коэффициент").arg(i+1)); return false; }
+        const float r = meas / cur;                     // сырое = измерено/текущий (ключ интерполяции)
+        if (r <= prevR) { appendLog(QStringLiteral("⚠ скорость должна строго возрастать (строка %1)").arg(i+1)); return false; }
+        prevR = r;
+        for (int b=0;b<4;++b) body.append(char((*reinterpret_cast<const quint32*>(&r)    >> (8*b)) & 0xFF));
+        for (int b=0;b<4;++b) body.append(char((*reinterpret_cast<const quint32*>(&newk) >> (8*b)) & 0xFF));
+        ++cnt;
+    }
+    if (cnt < 2 || cnt > 16) { appendLog(QStringLiteral("⚠ Нужно 2–16 ИЗМЕРЕННЫХ узлов (сейчас %1)").arg(cnt)); return false; }
+    if (confirm && QMessageBox::question(this, QStringLiteral("Запись калибровки"),
+            QStringLiteral("Записать %1 узлов калибровки во внутреннюю Flash (стр.123)?").arg(cnt))
+        != QMessageBox::Yes) return false;
+    QByteArray p; p.append(char(cnt)); p.append(body);
+    requestCmd(LtpCmd::SPEED_CAL_SET, p, TagManual);
+    appendLog(QStringLiteral("[TX] SPEED_CAL_SET: %1 узлов").arg(cnt));
+    if (reread)
+        requestCmd(LtpCmd::SPEED_CAL_GET, {}, TagManual);   // контрольное чтение (текущий←новый)
+    return true;
+}
+
 // ── Авто-калибровка скорости: стенд по столбцу «Задано», живой опрос гироскопа ─
-static constexpr int kSpeedCalSettleMs = 4500;   // разгон/устаканивание на ступени (дольше — стабильнее)
-static constexpr int kSpeedCalMeasMs   = 5000;   // окно измерения гироскопом
+// Время разгона/паузы и измерения — из UI (m_speedCal.settleMs/measMs).
 static constexpr int kSpeedCalTickMs   = 100;    // период тика/опроса (чаще → больше выборок)
 
 void MainWindow::speedCalAutoStart()
@@ -1543,27 +1600,37 @@ void MainWindow::speedCalAutoStart()
     if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
     const int n = ui->tblSpeedCal->rowCount();
     if (n < 1) { appendLog(QStringLiteral("⚠ Таблица пуста — задайте скорости в «Задано»")); return; }
-    QVector<double> targets;
+    QVector<double> targets; QVector<int> rows;
     for (int i = 0; i < n; ++i) {
         auto *it = ui->tblSpeedCal->item(i, 0);
-        const double v = it ? it->text().trimmed().toDouble() : 0.0;
+        if (!it || it->checkState() != Qt::Checked) continue;   // не отмечена — пропускаем
+        const double v = it->text().trimmed().toDouble();
         if (v <= 0.0) { appendLog(QStringLiteral("⚠ Строка %1: «Задано» не число").arg(i+1)); return; }
-        targets << v;
+        targets << v; rows << i;
     }
+    if (targets.isEmpty()) { appendLog(QStringLiteral("⚠ Не отмечено ни одной скорости")); return; }
     if (QMessageBox::question(this, QStringLiteral("Калибровка скорости"),
-            QStringLiteral("Прогнать стенд по %1 скоростям и измерить гироскопом?\n"
-                           "Мотор будет вращаться.").arg(n)) != QMessageBox::Yes) return;
+            QStringLiteral("Прогнать стенд по %1 отмеченным скоростям и измерить гироскопом?\n"
+                           "Мотор будет вращаться.").arg(targets.size())) != QMessageBox::Yes) return;
 
     m_dev->enqueue(LtpCmd::GYRO_GET_FS, {}, TagMon);   // чувствительность гироскопа (raw→°/с)
 
     m_speedCal.running = true;
     m_speedCal.targets = targets;
+    m_speedCal.rows    = rows;
     m_speedCal.curRow  = 0;
     m_speedCal.phase   = 0;
     m_speedCal.phaseMs = 0;
     m_speedCal.samples.clear();
+    m_speedCal.settleMs    = ui->spinCalPause->value()  * 1000;   // пауза/разгон (может быть 0)
+    m_speedCal.measMs      = ui->spinCalDwell->value()  * 1000;   // время измерения
+    m_speedCal.cyclesTotal = ui->spinCalCycles->value();
+    m_speedCal.cycle       = 0;
+    m_speedCal.autoUpdate  = ui->chkCalAutoUpdate->isChecked();
     ui->btnSpeedCalAuto->setText(QStringLiteral("Стоп"));
-    appendLog(QStringLiteral("[Калибровка] старт: %1 ступеней").arg(n));
+    appendLog(QStringLiteral("[Калибровка] старт: %1 ступеней × %2 циклов%3")
+                  .arg(targets.size()).arg(m_speedCal.cyclesTotal)
+                  .arg(m_speedCal.autoUpdate ? QStringLiteral(", авто-обновление") : QString()));
 
     auto sendSpeed = [this](double rpm) {
         const quint16 s = quint16(qRound(rpm));
@@ -1573,7 +1640,7 @@ void MainWindow::speedCalAutoStart()
         return s;
     };
     const quint16 s0 = sendSpeed(targets[0]);
-    appendLog(QStringLiteral("[Калибровка] ступень 1/%1: задано %2 об/мин").arg(n).arg(s0));
+    appendLog(QStringLiteral("[Калибровка] ступень 1/%1: задано %2 об/мин").arg(targets.size()).arg(s0));
     m_speedCalTimer.start(kSpeedCalTickMs);
 }
 
@@ -1586,10 +1653,11 @@ void MainWindow::speedCalAutoTick()
     { QSignalBlocker b(ui->tblSpeedCal);
       speedCalClearHighlight();
       const bool on = (m_speedCal.phaseMs / 400) % 2 == 0;
-      speedCalHighlightRow(m_speedCal.curRow, on, m_speedCal.phase); }
+      const int trow = (m_speedCal.curRow < m_speedCal.rows.size()) ? m_speedCal.rows[m_speedCal.curRow] : -1;
+      speedCalHighlightRow(trow, on, m_speedCal.phase); }
 
-    if (m_speedCal.phase == 0) {                       // разгон/устаканивание
-        if (m_speedCal.phaseMs >= kSpeedCalSettleMs) {
+    if (m_speedCal.phase == 0) {                       // разгон/устаканивание/пауза
+        if (m_speedCal.phaseMs >= m_speedCal.settleMs) {
             m_speedCal.phase = 1; m_speedCal.phaseMs = 0;
             m_speedCal.samples.clear();
         }
@@ -1597,9 +1665,10 @@ void MainWindow::speedCalAutoTick()
     }
     // phase 1 — измерение: опрашиваем гироскоп (ответы копит speedCalAutoAccum)
     m_dev->enqueue(LtpCmd::GET_AXES_RAW, {}, TagSpeedCal);
-    if (m_speedCal.phaseMs < kSpeedCalMeasMs) return;
+    if (m_speedCal.phaseMs < m_speedCal.measMs) return;
 
-    const int row = m_speedCal.curRow;
+    const int idx = m_speedCal.curRow;                       // индекс в прогоне
+    const int row = m_speedCal.rows[idx];                    // фактическая строка таблицы
     // Усечённое среднее: сортируем, отбрасываем по 20% с краёв (выбросы/дрожь
     // разгона) → устойчивая оценка сырой об/мин, лучше повторяемость.
     double raw = 0.0;
@@ -1617,17 +1686,49 @@ void MainWindow::speedCalAutoTick()
       const double meas = raw * cur;                    // измерено = сырое × текущий
       speedCalSetCell(row, 1, QString::number(meas, 'f', 1), true);
       speedCalRecompute(row); }
-    appendLog(QStringLiteral("[Калибровка] ступень %1: сырое %2 об/мин (%3 выборок, усеч.)")
-                  .arg(row+1).arg(raw, 0, 'f', 1).arg(m_speedCal.samples.size()));
+    appendLog(QStringLiteral("[Калибровка] ступень %1/%2: сырое %3 об/мин (%4 выборок, усеч.)")
+                  .arg(idx+1).arg(m_speedCal.targets.size()).arg(raw, 0, 'f', 1).arg(m_speedCal.samples.size()));
 
-    if (row + 1 >= m_speedCal.targets.size()) { speedCalAutoStop(true); return; }
-    m_speedCal.curRow = row + 1;
+    auto sendSpeedIdx = [this](int j) {
+        const quint16 s = quint16(qRound(m_speedCal.targets[j]));
+        QByteArray p(3, 0);
+        p[0] = char(s & 0xFF); p[1] = char((s >> 8) & 0xFF); p[2] = char(kStendMicrostepCoef);
+        m_dev->enqueueTo(LtpAddr::STEND, LtpCmd::STEND_SPEED, p, TagStend);
+        return s;
+    };
+
+    if (idx + 1 >= m_speedCal.targets.size()) {
+        // ── Цикл (весь набор) пройден ──
+        if (m_speedCal.autoUpdate) {
+            // Записать коэффициенты в прибор (без re-read, чтобы не переформатировать
+            // таблицу в прогоне) и локально сдвинуть текущий←новый: следующий цикл
+            // измеряет уже с обновлённым коэффициентом.
+            speedCalWrite(false, false);
+            QSignalBlocker b(ui->tblSpeedCal);
+            for (int rr : m_speedCal.rows) {
+                auto *ik = ui->tblSpeedCal->item(rr, 4);
+                if (ik && !ik->text().trimmed().isEmpty()) {
+                    speedCalSetCell(rr, 2, ik->text().trimmed(), false);   // текущий = новый
+                    speedCalRecompute(rr);
+                }
+            }
+        }
+        if (m_speedCal.cycle + 1 >= m_speedCal.cyclesTotal) { speedCalAutoStop(true); return; }
+        ++m_speedCal.cycle;                       // следующий цикл — с начала набора
+        m_speedCal.curRow = 0;
+        m_speedCal.phase = 0; m_speedCal.phaseMs = 0;
+        const quint16 s = sendSpeedIdx(0);
+        appendLog(QStringLiteral("[Калибровка] цикл %1/%2, ступень 1/%3: задано %4 об/мин")
+                      .arg(m_speedCal.cycle+1).arg(m_speedCal.cyclesTotal)
+                      .arg(m_speedCal.targets.size()).arg(s));
+        return;
+    }
+    // следующая ступень внутри цикла
+    m_speedCal.curRow = idx + 1;
     m_speedCal.phase = 0; m_speedCal.phaseMs = 0;
-    const quint16 s = quint16(qRound(m_speedCal.targets[m_speedCal.curRow]));
-    QByteArray p(3, 0);
-    p[0] = char(s & 0xFF); p[1] = char((s >> 8) & 0xFF); p[2] = char(kStendMicrostepCoef);
-    m_dev->enqueueTo(LtpAddr::STEND, LtpCmd::STEND_SPEED, p, TagStend);
-    appendLog(QStringLiteral("[Калибровка] ступень %1/%2: задано %3 об/мин")
+    const quint16 s = sendSpeedIdx(m_speedCal.curRow);
+    appendLog(QStringLiteral("[Калибровка] цикл %1/%2, ступень %3/%4: задано %5 об/мин")
+                  .arg(m_speedCal.cycle+1).arg(m_speedCal.cyclesTotal)
                   .arg(m_speedCal.curRow+1).arg(m_speedCal.targets.size()).arg(s));
 }
 
@@ -1673,6 +1774,39 @@ void MainWindow::speedCalClearHighlight()
     for (int r = 0; r < ui->tblSpeedCal->rowCount(); ++r)
         for (int c = 0; c < ui->tblSpeedCal->columnCount(); ++c)
             if (auto *it = ui->tblSpeedCal->item(r, c)) it->setBackground(QBrush());
+}
+
+// Цвет кнопок грубой калибровки RTC — наглядное состояние процесса:
+//   0 idle — всё «прозрачное» (обычный вид), «Применить» недоступно;
+//   1 идёт выдержка (после «Старт») — «Старт» ЗЕЛЁНАЯ (активна), «Стоп» КРАСНАЯ (жми дальше);
+//   2 расчёт готов (после «Стоп») — обе ЗЕЛЁНЫЕ (данные зафиксированы), «Применить» МОРГАЕТ.
+// После «Применить» → снова 0 (всё прозрачное).
+void MainWindow::rtcCalUpdateButtons(int state)
+{
+    static const QString green = QStringLiteral("background:#1D7A4C;color:#F5F4F0;");
+    static const QString red   = QStringLiteral("background:#8A2E2E;color:#F5F4F0;");
+    m_rtcCalUiState = state;
+    m_rtcApplyBlinkTimer.stop();
+    ui->btnRtcCalApply->setStyleSheet(QString());
+    if (state != 1) {
+        ui->btnRtcCalStop->setText(QStringLiteral("Стоп"));  // вне выдержки — обычный текст
+        ui->lblRtcCurPpm->setText(QStringLiteral("%1 ppm").arg(m_rtcCurPpm, 0, 'f', 1));  // обычная поправка
+    }
+    if (state == 1) {
+        ui->btnRtcCalStart->setStyleSheet(green);
+        ui->btnRtcCalStop ->setStyleSheet(red);
+        ui->btnRtcCalApply->setEnabled(false);
+    } else if (state == 2) {
+        ui->btnRtcCalStart->setStyleSheet(green);
+        ui->btnRtcCalStop ->setStyleSheet(green);
+        ui->btnRtcCalApply->setEnabled(true);
+        m_rtcApplyBlinkOn = false;
+        m_rtcApplyBlinkTimer.start(500);   // «Применить» моргает — зовёт нажать
+    } else {                                // idle — всё прозрачное
+        ui->btnRtcCalStart->setStyleSheet(QString());
+        ui->btnRtcCalStop ->setStyleSheet(QString());
+        ui->btnRtcCalApply->setEnabled(false);
+    }
 }
 
 void MainWindow::onScanClicked()
@@ -1787,6 +1921,15 @@ void MainWindow::onScanFinished(const QString &foundPort)
     probeFlashImageState();
     m_binSearchRetries = 0;   // сброс при каждом новом подключении
     flashBinSearchStart();
+
+    // Если при подключении активна вкладка «Калибровка» — сразу подтянуть таблицу
+    // скорости/поправку/опорную точку (currentChanged на старте не срабатывает,
+    // связь появляется позже → окно оставалось пустым до смены вкладки).
+    if (ui->tabsMain->currentWidget() == ui->tabCalibration) {
+        m_dev->enqueue(LtpCmd::SPEED_CAL_GET, {}, TagManual);
+        m_dev->enqueue(LtpCmd::RTC_CALIB_GET, {}, TagManual);
+        m_dev->enqueue(LtpCmd::SYNC_REF_GET, {}, TagSyncCheck);
+    }
 
     // (05.07.2026) Авто-чтение архива при подключении УБРАНО: оно лупило по
     // устройству полным чтением журнала (стр.1..65534) прямо на коннекте и,
@@ -2052,21 +2195,60 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         ui->lblDevDateTime->setText(
             devDt.toString(QStringLiteral("HH:mm:ss  dd/MM/yyyy")));
 
+        // Флаг истины по САМИМ ЧАСАМ: если часы устройства сбросились в 2000 (было
+        // включение питания), опорная точка калибровки недействительна — сразу
+        // деактивируем кнопки (работает и без пересборки A, по обычному GET_DATETIME).
+        if (devDt.date().year() < 2020 && m_rtcCalUiState != 0
+            && tag != TagRtcCalStop) {
+            m_rtcCalActive = false;
+            QSettings(kOrg, kApp).remove(QStringLiteral("rtcCal"));
+            rtcCalUpdateButtons(0);
+            ui->lblRtcCalStatus->setText(QStringLiteral("Часы сбились в 2000 (было включение питания) — опорная точка потеряна. Синхронизируйте заново."));
+        }
+
+        // Живой предпросмотр поправки во время выдержки: ЗЕЛЁНАЯ — текущая (в работе),
+        // КРАСНАЯ — рассчитанная по накопленному интервалу (сходится с ростом выдержки).
+        if (m_rtcCalUiState == 1 && m_rtcCalT0.isValid() && devDt.date().year() >= 2020) {
+            const double elPc = double(m_rtcCalT0.secsTo(QDateTime::currentDateTime()));
+            if (elPc >= 1.0) {
+                const double elDev = double(m_rtcCalT0.secsTo(devDt));
+                const double resid = (elDev - elPc) / elPc * 1e6;
+                double calc = m_rtcCurPpm - resid;
+                if (calc >  488.0) calc =  488.0;
+                if (calc < -488.0) calc = -488.0;
+                ui->lblRtcCurPpm->setText(QStringLiteral(
+                    "<span style='color:#3CB371'>%1</span> &rarr; <span style='color:#D05555'>%2</span> ppm")
+                    .arg(m_rtcCurPpm, 0, 'f', 1).arg(calc, 0, 'f', 1));
+            }
+        }
+
         // «Стоп» грубой калибровки RTC (03.08.2026): дрейф по интервалу выдержки.
         if (tag == TagRtcCalStop && m_rtcCalActive) {
             m_rtcCalActive = false;
             const double elPc  = double(m_rtcCalT0.secsTo(QDateTime::currentDateTime()));
             const double elDev = double(m_rtcCalT0.secsTo(devDt));
-            if (elPc >= 1.0) {
-                const double resid = (elDev - elPc) / elPc * 1e6;   // дрейф устройства, ppm (+ спешит)
-                m_rtcCalNewPpm = m_rtcCurPpm - resid;               // новая поправка = текущая − остаточный дрейф
+            const double resid = (elPc >= 1.0) ? (elDev - elPc) / elPc * 1e6 : 0.0;
+            const double newPpm = m_rtcCurPpm - resid;
+            if (devDt.date().year() < 2020) {
+                // Часы устройства сбились (2000) во время выдержки — интервал битый.
+                rtcCalUpdateButtons(0);
+                QSettings(kOrg, kApp).remove(QStringLiteral("rtcCal"));
+                ui->lblRtcCalStatus->setText(QStringLiteral("Часы устройства сбились — расчёт невозможен. Синхронизируйте и начните заново."));
+            } else if (elPc < 1.0) {
+                ui->lblRtcCalStatus->setText(QStringLiteral("Слишком короткая выдержка — повторите с большим интервалом"));
+            } else if (std::fabs(newPpm) > 488.0) {
+                // Нефизичный результат (RTC умеет ±488 ppm) — интервал/данные битые.
+                rtcCalUpdateButtons(0);
+                ui->lblRtcCalStatus->setText(QStringLiteral("Нефизичный дрейф %1 ppm — расчёт отклонён. Проверьте синхронизацию и выдержку.")
+                    .arg(resid, 0, 'f', 0));
+            } else {
+                m_rtcCalNewPpm = newPpm;
                 ui->lblRtcCalStatus->setText(QStringLiteral("Выдержка %1 c: дрейф %2 ppm → новая поправка %3 ppm")
                     .arg(qint64(elPc)).arg(resid, 0, 'f', 1).arg(m_rtcCalNewPpm, 0, 'f', 1));
-                ui->btnRtcCalApply->setEnabled(true);
+                rtcCalUpdateButtons(2);   // «Стоп» зелёная, «Применить» доступно (моргает)
+                QSettings(kOrg, kApp).remove(QStringLiteral("rtcCal"));   // выдержка закрыта
                 appendLog(QStringLiteral("[RTC-калибровка] выдержка %1 c, дрейф %2 ppm, новая поправка %3 ppm")
                     .arg(qint64(elPc)).arg(resid, 0, 'f', 1).arg(m_rtcCalNewPpm, 0, 'f', 1));
-            } else {
-                ui->lblRtcCalStatus->setText(QStringLiteral("Слишком короткая выдержка — повторите с большим интервалом"));
             }
         }
 
@@ -2428,7 +2610,53 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         if (payload.size() < 5 || d[0] != 0) break;
         float ppm; std::memcpy(&ppm, d + 1, 4);
         m_rtcCurPpm = double(ppm);
-        ui->lblRtcCurPpm->setText(QStringLiteral("%1 ppm").arg(double(ppm), 0, 'f', 1));
+        if (m_rtcCalUiState != 1)   // в выдержке строку ведёт живой апдейт (зел/красн)
+            ui->lblRtcCurPpm->setText(QStringLiteral("%1 ppm").arg(double(ppm), 0, 'f', 1));
+        break;
+    }
+    case LtpCmd::SYNC_REF_GET: {
+        // 0x38: [0]=err, [1]=valid, [2..5]=t0 u32(LE).
+        const bool devValid = (payload.size() >= 6 && d[0] == 0 && d[1] != 0);
+        if (tag == TagSyncCheck) {
+            // Проверка при подключении/открытии вкладки — устройство = источник
+            // истины. Валидно → выдержка идёт (кнопки в состояние 1). Невалидно
+            // (backup сброшен = было включение питания, часы сбились) → всё в
+            // исходное + стираем устаревший флаг в настройках ПК.
+            if (devValid) {
+                // Точка на устройстве цела — просто держим t0 актуальным, кнопки
+                // НЕ трогаем (проверка не «включает» выдержку сама; её начинает
+                // «Старт»/синхро, а состояние кнопок ведёт PC-restore + нажатия).
+                quint32 ts; std::memcpy(&ts, d + 2, 4);
+                m_rtcCalT0 = QDateTime::fromSecsSinceEpoch(qint64(ts));
+                m_rtcCalActive = true;
+            } else if (m_rtcCalUiState != 0) {
+                // Точки нет (backup сброшен = было включение питания, часы сбились)
+                // → ДЕАКТИВИРУЕМ: всё в исходное + стираем устаревший флаг ПК.
+                m_rtcCalActive = false;
+                QSettings(kOrg, kApp).remove(QStringLiteral("rtcCal"));
+                rtcCalUpdateButtons(0);
+                ui->lblRtcCalStatus->setText(QStringLiteral("Опорная точка потеряна (было включение питания / часы сбились). Синхронизируйте заново."));
+            }
+            break;
+        }
+        if (tag != TagRtcCalStop) break;
+        // Ответ на «Стоп»: валидно — t0 с устройства; иначе — откат на сессию/
+        // настройки ПК; нет и их — отказ (backup сброшен = часы сбились).
+        if (devValid) {
+            quint32 ts; std::memcpy(&ts, d + 2, 4);
+            m_rtcCalT0 = QDateTime::fromSecsSinceEpoch(qint64(ts));
+            m_rtcCalActive = true;
+            appendLog(QStringLiteral("[RTC-калибровка] опорная точка с устройства: %1")
+                .arg(m_rtcCalT0.toString(QStringLiteral("yy.MM.dd HH:mm:ss"))));
+        } else if (!m_rtcCalActive) {
+            ui->lblRtcCalStatus->setText(QStringLiteral("Опорная точка потеряна (питание/часы сбились) — нажмите «Старт» или синхронизируйте"));
+            appendLog(QStringLiteral("⚠ [RTC-калибровка] нет валидной опорной точки — расчёт отменён"));
+            break;
+        } else {
+            appendLog(QStringLiteral("[RTC-калибровка] устройство без опорной точки — использую t0 сессии"));
+        }
+        requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);      // свежая текущая поправка
+        requestCmd(LtpCmd::GET_DATETIME, {}, TagRtcCalStop);   // → расчёт (обработчик GET_DATETIME)
         break;
     }
     case LtpCmd::SPEED_CAL_GET: {
@@ -3423,6 +3651,17 @@ void MainWindow::tickPcClock()
 {
     ui->lblPcTime->setText(QTime::currentTime().toString(QStringLiteral("HH:mm:ss")));
     ui->lblStendPcTime->setText(ui->lblPcTime->text());   // дубль на «Стенде» (18.07)
+
+    // Идёт выдержка RTC-калибровки → на кнопке «Стоп» живой накопленный интервал
+    // (функционально: видно, сколько уже копится). Вне выдержки — просто «Стоп».
+    if (m_rtcCalUiState == 1 && m_rtcCalT0.isValid()) {
+        qint64 el = m_rtcCalT0.secsTo(QDateTime::currentDateTime());
+        if (el < 0) el = 0;
+        const qint64 h = el / 3600;          // суммарные ЧАСЫ (могут быть >24, напр. 602)
+        const qint64 m = (el % 3600) / 60, s = el % 60;
+        ui->btnRtcCalStop->setText(QStringLiteral("Стоп  %1:%2:%3")
+            .arg(h).arg(m,2,10,QLatin1Char('0')).arg(s,2,10,QLatin1Char('0')));
+    }
 
     // Часы сбиты: НЕ моргаем «XX:XX» — lblDevTime показывает реальное время
     // регистратора (красным), обновляется периодическим GET_DATETIME, чтобы
