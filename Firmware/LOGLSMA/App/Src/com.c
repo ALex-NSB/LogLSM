@@ -63,6 +63,8 @@ void cmdRtcCalibGet(LtpPacket *wc);                /* 0x33 — чтение по
 void cmdRtcCalibSet(LtpPacket *wc);                /* 0x34 — запись поправки RTC ppm на стр.123, Сервис */
 void cmdPassportGet(LtpPacket *wc);                /* 0x35 — чтение паспорта (стр.123) → ПК, Сервис */
 void cmdPassportSet(LtpPacket *wc);                /* 0x36 — запись паспорта на стр.123, Сервис */
+void cmdSyncRefSet(LtpPacket *wc);                 /* 0x37 — задать опорную точку синхро (t0) в backup-регистр */
+void cmdSyncRefGet(LtpPacket *wc);                 /* 0x38 — прочитать опорную точку синхро + валидность */
 void cmdFlashPageEraseHandler(LtpPacket *wc);
 void cmdFlashSectorEraseHandler(LtpPacket *wc);       /* 0x1F */
 void cmdFlashWritePageHandler(LtpPacket *wc);         //C0 8D 05 00 00 00 00 00
@@ -161,7 +163,9 @@ static cmd_callback_t CMD[128] = {
     [0x30] = cmdDataFlagHandler,                /* 0x30  флаг «непрочитанные данные» (внутр. Flash стр.122) — Сервис */
     [0x31] = cmdRecFormatHandler,               /* 0x31  формат записи цикла (маркёр слова) — Сервис */
     [0x35] = cmdPassportGet,                     /* 0x35  паспорт: чтение (стр.123) — Сервис (03.08.2026) */
-    [0x36] = cmdPassportSet                      /* 0x36  паспорт: запись (стр.123) — Сервис (03.08.2026) */
+    [0x36] = cmdPassportSet,                      /* 0x36  паспорт: запись (стр.123) — Сервис (03.08.2026) */
+    [0x37] = cmdSyncRefSet,                       /* 0x37  опорная точка синхро: задать t0 (backup DR1) — 04.08.2026 */
+    [0x38] = cmdSyncRefGet                        /* 0x38  опорная точка синхро: прочитать t0 + валидность — 04.08.2026 */
 };
   
 static LtpParser ltp_rx;          /* FSM-парсер входного потока */
@@ -665,8 +669,8 @@ void cmdPing(LtpPacket *wc)
 #define FW_YY  26   /* год  */
 #define FW_MM   8   /* мес  */
 #define FW_DD   3   /* число*/
-#define FW_HH  22   /* часы */
-#define FW_MI  25   /* мин  — активация АВТО-ЗАКРЫВАЕТ предыдущую незакрытую жизнь (END перед новым START) — незакрытых «(идёт)» в середине истории быть не должно; паспорт 0x35/0x36, 03.08.2026 */
+#define FW_HH  10   /* часы */
+#define FW_MI   9   /* мин  — RTC ppm клиппится к ±488 (физ. предел smooth-calib): мусорная поправка не попадёт в индикатор/железо; + опорная точка синхро в backup (0x37/0x38), 04.08.2026 */
 
 /* ИМЯ УСТРОЙСТВА — хранится в КОНТРОЛЛЕРЕ (паспорт; позже перенесём во
  * внутреннюю Flash STM32 как настраиваемый серийник/вариант). LOGLSMW просто
@@ -989,6 +993,37 @@ void cmdPassportSet(LtpPacket *wc)
   uint8_t day   = wc->data[20];
   if (data_passport_set(serial, variant, year, month, day) != 0) err = er_not_impl;
   sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* --- Опорная точка синхронизации часов (backup-регистры RTC) -----------------
+ * DR1 = t0 (unix-сек момента синхро, присылает ПК), DR2 = маркёр «синхро задано».
+ * Backup-домен гаснет ТОЛЬКО с питанием (как 0xBEBE в DR0): пропал маркёр = часы
+ * сбились в 00:00 → опорная точка НЕвалидна → калибровку применять нельзя.
+ * Обобщает «Стоп от активации» на любую синхро (тестовый прогон). 04.08.2026. */
+#define SYNC_REF_MARKER  0x5A5C0001u
+
+/* 0x37 — SET опорной точки: payload = ts u32 (unix, LE). Ответ: err(1). */
+void cmdSyncRefSet(LtpPacket *wc)
+{
+  uint8_t err = er_none;
+  if (wc->n < 4) { err = er_badarg; sendPacket(wc->addr, wc->cmd, &err, 1); return; }
+  uint32_t ts; memcpy(&ts, wc->data, 4);
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR1, ts);
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, SYNC_REF_MARKER);
+  sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* 0x38 — GET опорной точки: err(1) | valid u8 | ts u32(LE). valid=0, если маркёр
+ * пропал (backup сброшен питанием = часы сбились) → калибровать нельзя. */
+void cmdSyncRefGet(LtpPacket *wc)
+{
+  uint8_t valid = (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2) == SYNC_REF_MARKER) ? 1u : 0u;
+  uint32_t ts = valid ? HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR1) : 0u;
+  uint8_t ans[6];
+  ans[0] = er_none;
+  ans[1] = valid;
+  memcpy(&ans[2], &ts, 4);
+  sendPacket(wc->addr, wc->cmd, ans, 6);
 }
 
 /* 0x2E — ИСТОРИЯ АКТИВАЦИЙ: события «жизней» со стр.121 (03.08.2026).

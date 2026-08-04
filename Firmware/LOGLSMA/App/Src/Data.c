@@ -224,9 +224,16 @@ int data_speedcal_set(const float *r, const float *k, uint16_t n)
 
 static float s_rtcAppliedPpm = RTC_CAL_DEFAULT_PPM;
 
+/* Физический предел RTC smooth-calib: CALP до +512, CALM до −511 импульсов ×
+ * шаг 0.954 ppm ≈ ±488 ppm. Всё сверх — клиппим, чтобы в поле/индикатор не
+ * попадало нефизичное значение (мусорная поправка от битого «Стоп»). 04.08.2026 */
+#define RTC_CAL_PPM_MAX  488.0f
+
 /* ppm → (CALP, CALM) и применить. net_ppm = (512*CALP − CALM)*step. */
 static void rtc_apply_ppm(float ppm)
 {
+  if (ppm >  RTC_CAL_PPM_MAX) ppm =  RTC_CAL_PPM_MAX;   /* клип к реальному диапазону */
+  if (ppm < -RTC_CAL_PPM_MAX) ppm = -RTC_CAL_PPM_MAX;
   int32_t pulses = (int32_t)(ppm / RTC_CAL_STEP_PPM + (ppm >= 0 ? 0.5f : -0.5f));
   uint32_t calp, calm;
   if (pulses >= 0) {                        /* ускорить */
