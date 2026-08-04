@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Debug STM32L433CC (ST-Link)",
             "type": "cortex-debug",

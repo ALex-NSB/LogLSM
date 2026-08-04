@@ -16,6 +16,9 @@
 #include <QFontDatabase>
 #include <QMap>
 #include <QMessageBox>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QBrush>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -65,6 +68,11 @@ constexpr quint32 TagStend   = 8;   // команда стенду (0x8C) — ST
 constexpr quint32 TagMon     = 9;   // фоновый опрос вкладки «Мониторинг» (GET_AXES_RAW/GET_TEMP_*)
 constexpr quint32 TagSyncTime  = 10; // ручная синхронизация времени (btnSyncTime/btnGetTime) — логировать ответ
 constexpr quint32 TagBinSearch = 11; // бинарный поиск первой свободной страницы Flash
+constexpr quint32 TagWriteVerify = 12; // контрольное чтение сразу после записи страницы (22.07.2026)
+constexpr quint32 TagSpeedTest = 13; // ответ замера скорости флеша контроллером (0x2D, 26.07.2026)
+constexpr quint32 TagActDump   = 14; // постраничное чтение образа для сохранения на диск в шаге 1 активации (27.07.2026)
+constexpr quint32 TagRtcCalStop = 15; // контрольное чтение времени при «Стоп» грубой калибровки RTC (03.08.2026)
+constexpr quint32 TagSpeedCal   = 16; // авто-калибровка скорости: опрос гироскопа на каждой ступени (03.08.2026)
 
 // Чувствительность LSM6DSO по факт. полной шкале (ACC_GET_FS/GYRO_GET_FS,
 // см. devicecontroller.h) — значения из лежащей в основе ST-библиотеки
@@ -108,8 +116,8 @@ constexpr quint32 kFlashTotalPages = 65536;
 // (17.07.2026 — при «Страниц»=65536 вход монтировал весь чип без остановки).
 // Ручное «Прочитать» читает полный заданный диапазон, без ограничения.
 constexpr int     kAutoDumpMaxPages = 64;
-constexpr int     kRecordBytes     = 48;   // v2 (12.07.2026), было 24
-constexpr int     kRecordsPerPage  = 5;    // v2: 48-байт записи, 5 на 256-байт страницу
+constexpr int     kRecordBytes     = 48;   // базовая запись цикла (без маркёра слова)
+constexpr int     kRecordsPerPage  = 1;    // «1 цикл = 1 слово» (28.07.2026): 1 запись/страница (было 5)
 
 // Реплика rtcToSec() прошивки (Data.c) — эпоха 2000, свой подсчёт високосных.
 // Нужна, чтобы реконструированный HEX записи совпадал байт-в-байт с чтением.
@@ -172,7 +180,7 @@ static QByteArray fwBuildRecord(const QDateTime &startTs, quint32 durS,
 }
 // Регистратор запись v2 (48 байт): 5 записей на страницу (256/48=5, 16 байт
 // хвоста — резерв). Было 10×24 до 12.07.2026, см. data_format_spec_v1.md.
-constexpr int kRegRecordsPerPage = 5;
+constexpr int kRegRecordsPerPage = 1;   // «1 цикл = 1 слово» (28.07.2026), было 5
 } // namespace
 
 struct MainWindow::ThemePalette {
@@ -232,14 +240,40 @@ applyTheme(m_darkTheme);
     // отдельных кнопок нет; подпись рисуется ВНУТРИ сегмента (ActivationBar).
     // 0 «Стереть память» (чип NOR) и 1 «Сброс перезапусков» (счётчики iflash) —
     // разные операции: стирание чипа счётчики НЕ трогает. 2..6 — пока без функции.
+    // Лента = карта активации. 7 сегментов (02.08.2026): РАБОЧИЕ кнопки слева,
+    // ИНДИКАТОРЫ справа. Кнопки (клик только в «Сервис»): Сохранить(0)/Сброс
+    // WDT(1)/Синхро время(2). Индикаторы: Датчики(3)/Память(4)/Тест записи(5)/
+    // VBAT(6). Сегмент «Активация» УБРАН: статус активации показывает правая
+    // панель (запись+дата) и вся зелёная лента; активация запускается кнопкой ▶.
     ui->barActivation->setSectorCount(7);
-    ui->barActivation->setSectorName(0, QStringLiteral("Стереть данные"));
-    ui->barActivation->setSectorName(1, QStringLiteral("Сброс WDT"));   // счётчики перезапусков
-    ui->barActivation->setSectorName(2, QStringLiteral("Синхро время"));
-    // 3..6 — функция ещё не назначена (21.07.2026, по замечанию): серый
-    // («заблокирован/неактивен»), не красный — чтобы не путать с «Idle».
-    for (int i = 3; i < ui->barActivation->sectorCount(); ++i)
+    ui->barActivation->setSectorName(0, QStringLiteral("Сохранить"));
+    ui->barActivation->setSectorName(1, QStringLiteral("Сброс WDT"));      // кнопка: обнуление счётчиков рестартов
+    ui->barActivation->setSectorName(2, QStringLiteral("Синхро время"));   // кнопка: SET_DATETIME
+    ui->barActivation->setSectorName(3, QStringLiteral("Датчики"));        // индикатор: WHO_AM_I + температура (ок/нет)
+    ui->barActivation->setSectorName(4, QStringLiteral("Память"));         // индикатор: стирание/пусто («Чисто»)
+    ui->barActivation->setSectorName(5, QStringLiteral("Чтение"));         // индикатор: запись шаблона → чтение/сверка → очистка
+    ui->barActivation->setSectorName(6, QStringLiteral("VBAT"));           // индикатор-заглушка (вариант B)
+    for (int i = 1; i <= 5; ++i)
         ui->barActivation->setSectorState(i, ActivationBar::SectorState::Disabled);
+    // VBAT (6) — заглушка (реальное чтение батареи — в варианте B). Статично
+    // серый; МОРГАЕТ жёлтым ТОЛЬКО когда активация завершена (лента зелёная) —
+    // напоминание «не забудь проверить батарею перед развёртыванием». В остальных
+    // состояниях не мигает (раздражает). 28.07.2026 / VBAT переиндексирован 7→6.
+    ui->barActivation->setSectorState(6, ActivationBar::SectorState::Disabled);
+    {   auto *vbatTimer = new QTimer(this);
+        connect(vbatTimer, &QTimer::timeout, this, [this] {
+            if (m_act.step != ActStep::Done) {            // не после активации — не мигаем
+                if (m_vbatBlink) { m_vbatBlink = false;
+                    ui->barActivation->setSectorState(6, ActivationBar::SectorState::Disabled); }
+                return;
+            }
+            m_vbatBlink = !m_vbatBlink;
+            ui->barActivation->setSectorState(6, m_vbatBlink
+                ? ActivationBar::SectorState::Active       // жёлтый
+                : ActivationBar::SectorState::Disabled);   // серый
+        });
+        vbatTimer->start(900);
+    }
     // Клик по сегменту — выполнить его операцию отдельно (17.07.2026).
     connect(ui->barActivation, &ActivationBar::sectorClicked,
             this, &MainWindow::onActivationSectorClicked);
@@ -297,7 +331,7 @@ applyTheme(m_darkTheme);
         // rootLayout, а не подобранное число — не «уедет» на другом стиле/DPI).
         auto *svcWrap = new QWidget(this);
         auto *svcLay  = new QHBoxLayout(svcWrap);
-        svcLay->setContentsMargins(0, 0, ui->rootLayout->contentsMargins().right(), 0);
+        svcLay->setContentsMargins(0, 0, ui->rootLayout->contentsMargins().right() + 10, 0);
         svcLay->addWidget(btnSvc);
         ui->menubar->setCornerWidget(svcWrap, Qt::TopRightCorner);
     }
@@ -337,7 +371,8 @@ applyTheme(m_darkTheme);
         m_dev->enqueue(LtpCmd::GET_DATETIME);
         static int tick = 0;
         if (++tick % 5 == 0) {
-            if (ui->tabsMain->currentWidget() == ui->tabMemTest) {
+            if (ui->tabsMain->currentWidget() == ui->tabMemTest
+                || ui->tabsMain->currentWidget() == ui->tabMonitor) {
                 m_dev->enqueue(LtpCmd::GET_TEMP_TMP117);   // все 3 датчика
                 m_dev->enqueue(LtpCmd::GET_TEMP_IMU);
                 m_dev->enqueue(LtpCmd::GET_TEMP_STM);
@@ -349,8 +384,15 @@ applyTheme(m_darkTheme);
                 // (07.07.2026, по запросу: после щелчка питанием счётчик
                 // подтягивается автоматически, регистратор через стенд не даёт
                 // события переподключения). Счётчик меняется редко — 5 с с запасом.
-                if (ui->tabsMain->currentWidget() == ui->tabDashboard)
+                if (ui->tabsMain->currentWidget() == ui->tabDashboard) {
+                    // DATA_FLAG (0x30=0) ПЕРВЫМ, затем GET_STATS: «активирован»
+                    // карточки берётся из маски флагов (NOR-байт [0]) → должно быть
+                    // свежим к моменту разбора GET_STATS. Иначе после «Очистить
+                    // журналы» карточка врала «не активирован» при взведённом
+                    // флаге (журнал пуст, а флаг стоит). 03.08.2026.
+                    m_dev->enqueue(LtpCmd::DATA_FLAG, QByteArray(1, char(0)));
                     m_dev->enqueue(LtpCmd::GET_STATS);
+                }
             }
         }
     });
@@ -362,6 +404,7 @@ applyTheme(m_darkTheme);
     // результатами испытания. Обновлено 30.06.2026: теперь заполняет и
     // дашборд, и панель сравнения стенда (ранее — только cmpReport).
     connect(ui->chkSimulation, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_actSimulation && m_actSimulation->isChecked() != on) m_actSimulation->setChecked(on);
         auto tighten = [](QPlainTextEdit *e) {
             QTextCursor c(e->document());
             c.select(QTextCursor::Document);
@@ -389,7 +432,7 @@ applyTheme(m_darkTheme);
 
             // ── Дашборд: температуры и питание ───────────────────────────
             ui->lblTempCur->setText(QStringLiteral("23.4 °C"));
-            ui->lblTempCurCaption->setText(QStringLiteral("текущая · LSM"));
+            ui->lblTempCurCaption->setText(QStringLiteral("текущая"));
             ui->lblTempMax->setText(QStringLiteral("31.7 °C"));
             ui->lblVdda->setText(QStringLiteral("3.6 В"));
 
@@ -446,6 +489,9 @@ applyTheme(m_darkTheme);
                                " color: rgba(255,255,255,140); font-size: 12px; }"));
             ui->btnScan->setText(QStringLiteral("ВКЛ"));
             ui->lblDevCard->setText(QStringLiteral("LogLSMW · сервис регистратора"));
+            // Без связи — в заголовке только версия приложения (W); версия
+            // прошивки (A) добавится при подключении (WHO_AM_I).
+            setWindowTitle(QStringLiteral("LogLSMW %1").arg(qApp->applicationVersion()));
             ui->lblWhoAmI->clear();
 
             // ── Сброс: дашборд ────────────────────────────────────────────
@@ -501,8 +547,19 @@ void MainWindow::setupCore()
     // Unsolicited push от регистратора (BENCH-режим: CMD_CYCLE_PUSH 0x20)
     connect(m_dev, &DeviceController::unsolicitedFromReg,
             this, [this](quint8 cmd, QByteArray payload) {
-        if (cmd == LtpCmd::CYCLE_PUSH)
+        if (cmd == LtpCmd::CYCLE_PUSH) {
             stendFillRegColumn(payload);
+            // Прибор записал цикл в Flash → есть несохранённые данные (прошивка
+            // взвела флаг стр.122). Красим «Сохранить» в красный СРАЗУ по пушу.
+            // Напрямую (не через updateSaveSegment): m_firstFreePage может быть
+            // устаревшим («пусто») и дал бы ошибочный «Стёрто». (28.07.2026)
+            m_dataFlagSet = true;
+            if (m_act.step == ActStep::Idle || m_act.step == ActStep::Done
+                    || m_act.step == ActStep::Error) {
+                ui->barActivation->setSectorName(0, QStringLiteral("Сохранить"));
+                ui->barActivation->setSectorState(0, ActivationBar::SectorState::Idle);
+            }
+        }
         else if (cmd == LtpCmd::SUBSPEED_PUSH)
             stendFillSubSpeeds(payload);
         else if (cmd == LtpCmd::WDG_KICK) {
@@ -594,6 +651,233 @@ void MainWindow::setupCore()
         appendLog(QStringLiteral("[TX] GET_TEMP_CHIP STM32"));
     });
 
+    // «Очистить журналы» (0x27, «Калибровка») — provision: стереть журнал
+    // активаций (стр.121) + счётчики рестартов (124..127) → прибор «не
+    // активирован», паспорт/калибровки (стр.123) целы. Только Сервис (03.08.2026).
+    connect(ui->btnClearJournals, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        if (QMessageBox::warning(this, QStringLiteral("Очистить журналы"),
+                QStringLiteral("Стереть журнал активаций и счётчики рестартов?\n"
+                    "Прибор станет «не активирован». Паспорт и калибровки НЕ затрагиваются."),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        requestCmd(LtpCmd::CLEAR_JOURNALS, {}, TagManual);
+        appendLog(QStringLiteral("[TX] CLEAR_JOURNALS (0x27)"));
+        requestCmd(LtpCmd::GET_STATS,   {}, TagManual);   // обновить состояние активации
+        requestCmd(LtpCmd::ACT_HISTORY, {}, TagManual);   // обновить список «жизней»
+    });
+
+    // «Обновление ПО STM32» («Калибровка», 03.08.2026) — свой бутлоадер (приём
+    // образа по LTP + запись во внутр. Flash) ПОКА НЕ реализован. Сейчас работает
+    // только выбор файла; заливка — следующий шаг (bootloader-раздел + протокол).
+    // «Часы RTC» («Калибровка») — чтение и синхронизация по границе секунды.
+    connect(ui->btnRtcRead, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        requestCmd(LtpCmd::GET_DATETIME, {}, TagSyncTime);
+    });
+    connect(ui->btnRtcSync, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        const int msToEdge = 1000 - QTime::currentTime().msec();
+        QTimer::singleShot(msToEdge, this, [this] {
+            const QDateTime now = QDateTime::currentDateTime();
+            QByteArray p;
+            p.append(char(now.date().year() - 2000));
+            p.append(char(now.date().month()));
+            p.append(char(now.date().day()));
+            p.append(char(now.time().hour()));
+            p.append(char(now.time().minute()));
+            p.append(char(now.time().second()));
+            requestCmd(LtpCmd::SET_DATETIME, p, TagManual);
+            requestCmd(LtpCmd::GET_DATETIME, {}, TagSyncTime);   // контроль
+            appendLog(QStringLiteral("[TX] RTC ← ПК (по границе секунды)"));
+        });
+    });
+
+    // «Часы RTC» → грубая калибровка дрейфа (Старт/Стоп/Применить), 03.08.2026.
+    connect(ui->btnRtcCalStart, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);   // текущая поправка (для расчёта новой)
+        const int msToEdge = 1000 - QTime::currentTime().msec();
+        QTimer::singleShot(msToEdge, this, [this] {
+            const QDateTime now = QDateTime::currentDateTime();
+            QByteArray p;
+            p.append(char(now.date().year() - 2000));
+            p.append(char(now.date().month()));
+            p.append(char(now.date().day()));
+            p.append(char(now.time().hour()));
+            p.append(char(now.time().minute()));
+            p.append(char(now.time().second()));
+            requestCmd(LtpCmd::SET_DATETIME, p, TagManual);
+            m_rtcCalT0 = QDateTime(now.date(), QTime(now.time().hour(),
+                                   now.time().minute(), now.time().second()));  // на границе секунды
+            m_rtcCalActive = true;
+            ui->btnRtcCalApply->setEnabled(false);
+            ui->lblRtcCalStatus->setText(QStringLiteral("Идёт выдержка… нажмите «Стоп» позже (дольше — точнее)"));
+            appendLog(QStringLiteral("[RTC-калибровка] старт, часы синхронизированы"));
+        });
+    });
+    connect(ui->btnRtcCalStop, &QPushButton::clicked, this, [this] {
+        if (!m_rtcCalActive) { appendLog(QStringLiteral("⚠ Калибровка не запущена")); return; }
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        requestCmd(LtpCmd::GET_DATETIME, {}, TagRtcCalStop);   // расчёт в обработчике GET_DATETIME
+    });
+    // «Стоп от активации» (task #15): t0 = момент активации (ts_activation из
+    // GET_STATS). При активации волна синхронизирует часы и пишет ts_activation =
+    // PC-время, поэтому активация = длинный «Старт». Дрейф считается тем же
+    // обработчиком (TagRtcCalStop), просто m_rtcCalT0 берём из ts_activation.
+    connect(ui->btnRtcCalActStop, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        if (m_tsActivation == 0xFFFFFFFFu || m_tsActivation == 0u) {
+            appendLog(QStringLiteral("⚠ Устройство не активировано — нет t0 (обновите GET_STATS)"));
+            requestCmd(LtpCmd::GET_STATS, {}, TagManual);
+            return;
+        }
+        m_rtcCalT0 = QDateTime::fromSecsSinceEpoch(qint64(m_tsActivation));
+        m_rtcCalActive = true;
+        requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);      // текущая поправка (для расчёта новой)
+        requestCmd(LtpCmd::GET_DATETIME, {}, TagRtcCalStop);   // → расчёт
+        appendLog(QStringLiteral("[RTC-калибровка] стоп от активации (t0=%1)")
+            .arg(m_rtcCalT0.toString(QStringLiteral("yy.MM.dd HH:mm:ss"))));
+    });
+    connect(ui->btnRtcCalApply, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        float p = float(m_rtcCalNewPpm);
+        quint32 u; std::memcpy(&u, &p, 4);
+        QByteArray b; for (int i = 0; i < 4; ++i) b.append(char((u >> (8*i)) & 0xFF));
+        requestCmd(LtpCmd::RTC_CALIB_SET, b, TagManual);
+        appendLog(QStringLiteral("[TX] RTC_CALIB_SET %1 ppm").arg(m_rtcCalNewPpm, 0, 'f', 1));
+        requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);   // контроль
+        ui->btnRtcCalApply->setEnabled(false);
+    });
+
+    // «Калибровка скорости» («Калибровка») — чтение/дефолт/запись таблицы узлов.
+    connect(ui->btnSpeedCalRead, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        requestCmd(LtpCmd::SPEED_CAL_GET, {}, TagManual);
+    });
+    connect(ui->btnSpeedCalDefault, &QPushButton::clicked, this, [this] {
+        // Вкомпилированный дефолт прошивки (kSpeedCalDefault) — для наглядного
+        // старта редактирования; на устройство попадёт только по «Записать».
+        // Узловые скорости (задано), текущий коэфф = 1 (по умолчанию — без поправки),
+        // измерено пусто (заполнит прогон «Калибровать» или ручной ввод).
+        static const double nodes[] = { 50,70,90,115,150,195,245,292,330 };
+        const int nn = int(sizeof(nodes)/sizeof(nodes[0]));
+        ui->tblSpeedCal->setRowCount(nn);
+        { QSignalBlocker b(ui->tblSpeedCal);
+          for (int i = 0; i < nn; ++i) {
+              speedCalSetCell(i, 0, QString::number(nodes[i], 'f', 1), true);   // задано
+              speedCalSetCell(i, 1, QString(),                        true);    // измерено — пусто
+              speedCalSetCell(i, 2, QStringLiteral("1.000"),          false);   // текущий = 1
+              speedCalRecompute(i);
+          } }
+        appendLog(QStringLiteral("[Калибровка] шаблон: узлы, текущий=1 (не записано)"));
+    });
+    connect(ui->btnSpeedCalWrite, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        const int n = ui->tblSpeedCal->rowCount();
+        if (n < 2 || n > 16) { appendLog(QStringLiteral("⚠ Нужно 2–16 узлов")); return; }
+        QByteArray p; p.append(char(n));
+        double prevR = -1e9;
+        for (int i = 0; i < n; ++i) {
+            // На устройство: ключ интерполяции = СЫРАЯ об/мин (измерено/текущий),
+            // коэффициент = НОВЫЙ (кол.4). Прошивка в цикле умножает сырое на этот
+            // коэффициент → получает заданную скорость.
+            auto cell = [this,i](int c){ auto*it=ui->tblSpeedCal->item(i,c); return it?it->text().trimmed():QString(); };
+            bool okM=false, okK=false;
+            const float meas = cell(1).toFloat(&okM);       // измерено
+            const float newk = cell(4).toFloat(&okK);       // новый коэфф
+            float cur = cell(2).toFloat(); if (cur <= 0.f) cur = 1.f;   // текущий (кол.2, дефолт 1)
+            if (!okM || !okK) { appendLog(QStringLiteral("⚠ Строка %1: нет измерения/коэффициента").arg(i+1)); return; }
+            const float r = meas / cur;                     // сырое = измерено / текущий
+            const float k = newk;
+            if (r <= prevR)   { appendLog(QStringLiteral("⚠ скорость должна строго возрастать (строка %1)").arg(i+1)); return; }
+            prevR = r;
+            for (int b=0;b<4;++b) p.append(char((*reinterpret_cast<const quint32*>(&r) >> (8*b)) & 0xFF));
+            for (int b=0;b<4;++b) p.append(char((*reinterpret_cast<const quint32*>(&k) >> (8*b)) & 0xFF));
+        }
+        if (QMessageBox::question(this, QStringLiteral("Запись калибровки"),
+                QStringLiteral("Записать таблицу калибровки скорости во внутреннюю Flash (стр.123)?"))
+            != QMessageBox::Yes) return;
+        requestCmd(LtpCmd::SPEED_CAL_SET, p, TagManual);
+        appendLog(QStringLiteral("[TX] SPEED_CAL_SET: %1 узлов").arg(n));
+        requestCmd(LtpCmd::SPEED_CAL_GET, {}, TagManual);   // контрольное чтение
+    });
+    // Ручная правка «Задано»/«Измерено» → пересчёт Δ% и «Коэфф. новый» в строке.
+    connect(ui->tblSpeedCal, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
+        if (!it || (it->column() != 0 && it->column() != 1)) return;
+        QSignalBlocker b(ui->tblSpeedCal);
+        speedCalRecompute(it->row());
+    });
+    // Авто-калибровка: кнопка-переключатель (Калибровать/Стоп) + таймер прохода.
+    connect(ui->btnSpeedCalAuto, &QPushButton::clicked, this, [this] {
+        if (m_speedCal.running) speedCalAutoStop(false); else speedCalAutoStart();
+    });
+    connect(&m_speedCalTimer, &QTimer::timeout, this, &MainWindow::speedCalAutoTick);
+    // Таблица калибровки: 5 столбцов делят ширину поровну (без горизонтального
+    // скролла), без вертикальной нумерации, заголовки — вправо.
+    ui->tblSpeedCal->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    ui->tblSpeedCal->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    ui->tblSpeedCal->verticalHeader()->setVisible(false);
+    ui->tblSpeedCal->verticalHeader()->setDefaultSectionSize(30);   // компактнее строки — все узлы влезают
+    ui->tblSpeedCal->horizontalHeader()->setStyleSheet(
+        QStringLiteral("QHeaderView::section{font-size:8pt;padding:2px;}"));  // мельче — подписи влезают
+    // Вкладка «Калибровка»: левый столбец уже, правый (таблица) шире; верхняя
+    // строка выше нижней (столбцы/строки задаём кодом — uic не берёт из .ui).
+    ui->calibColumns->setColumnStretch(0, 2);
+    ui->calibColumns->setColumnStretch(1, 5);
+    ui->calibColumns->setRowStretch(0, 3);
+    ui->calibColumns->setRowStretch(1, 1);
+
+    // ── Паспорт устройства (стр.123): чтение/запись серийник/вариант/дата ──────
+    connect(ui->btnDevInfoRead, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        requestCmd(LtpCmd::PASSPORT_GET, {}, TagManual);
+        appendLog(QStringLiteral("[TX] PASSPORT_GET"));
+    });
+    connect(ui->btnDevInfoWrite, &QPushButton::clicked, this, [this] {
+        if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+        // Дата — НЕОБЯЗАТЕЛЬНА (пустое поле = без даты). Но если что-то ВВЕДЕНО —
+        // формат обязателен ГГГГ-ММ-ДД: подсказываем и НЕ пишем, пока не исправят
+        // (тихо игнорировать ввод нельзя).
+        const QString dtxt = ui->editProdDate->text().trimmed();
+        const QDate date = QDate::fromString(dtxt, QStringLiteral("yyyy-MM-dd"));
+        if (!dtxt.isEmpty() && !date.isValid()) {
+            QMessageBox::warning(this, QStringLiteral("Дата выпуска"),
+                QStringLiteral("Дата должна быть в формате ГГГГ-ММ-ДД (например 2026-06-16).\n"
+                               "Либо оставьте поле пустым — паспорт запишется без даты."));
+            return;
+        }
+        if (QMessageBox::question(this, QStringLiteral("Запись паспорта"),
+                QStringLiteral("Записать паспорт?"))
+            != QMessageBox::Yes) return;
+        QByteArray serial = ui->editSerial->text().trimmed().toLatin1();
+        serial.truncate(15);
+        serial.append(QByteArray(16 - serial.size(), '\0'));   // ровно 16 байт, '\0'-паддинг
+        const quint16 y  = date.isValid() ? quint16(date.year())  : 0;
+        const quint8  mo = date.isValid() ? quint8(date.month()) : 0;
+        const quint8  da = date.isValid() ? quint8(date.day())   : 0;
+        QByteArray p;
+        p.append(serial);                                       // [0..15] серийник
+        p.append(char(ui->cmbDevVariant->currentIndex() == 1 ? 0x0B : 0x0A));  // [16] вариант
+        p.append(char(y & 0xFF)); p.append(char((y >> 8) & 0xFF));             // [17..18] год LE
+        p.append(char(mo));                                      // [19] месяц
+        p.append(char(da));                                      // [20] день
+        requestCmd(LtpCmd::PASSPORT_SET, p, TagManual);
+        appendLog(QStringLiteral("[TX] PASSPORT_SET: %1").arg(ui->editSerial->text().trimmed()));
+        requestCmd(LtpCmd::PASSPORT_GET, {}, TagManual);         // контрольное чтение
+    });
+
+    connect(ui->btnFwBrowse, &QPushButton::clicked, this, [this] {
+        const QString fn = QFileDialog::getOpenFileName(this,
+            QStringLiteral("Файл прошивки STM32"), QString(),
+            QStringLiteral("Прошивка (*.bin);;Все файлы (*)"));
+        if (!fn.isEmpty()) ui->editFwFile->setText(fn);
+    });
+    connect(ui->btnFwUpdate, &QPushButton::clicked, this, [this] {
+        if (ui->editFwFile->text().isEmpty()) { appendLog(QStringLiteral("⚠ Сначала выберите файл прошивки")); return; }
+        appendLog(QStringLiteral("⚠ Обновление ПО STM32 — в разработке (нужен бутлоадер: приём образа по LTP + запись во внутр. Flash)"));
+    });
+
     // Скорость: последняя использованная, стартовый default 921600 — штатная
     // скорость прошивок Stend/Регистратор с 22.06.2026 (см. CLAUDE.md).
     ui->cmbBaud->setCurrentText(QSettings(kOrg, kApp)
@@ -611,6 +895,41 @@ void MainWindow::setupCore()
         ui->lblTempCur->setText(QStringLiteral("— °C"));
         if (m_link->isOpen())
             m_dev->enqueue(dashboardTempCmd());   // мгновенно подхватить новый датчик
+    });
+
+    // Формат записи цикла (28.07.2026): маркёр слова — 0 базовый / 1 уплотнённый /
+    // 2 подробный. Запоминаем выбор, при смене сразу шлём прибору (REC_FORMAT 0x31).
+    ui->cmbRecFormat->setCurrentIndex(QSettings(kOrg, kApp)
+        .value(QStringLiteral("device/recFormat"), 0).toInt());
+    connect(ui->cmbRecFormat, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        QSettings(kOrg, kApp).setValue(QStringLiteral("device/recFormat"), idx);
+        if (m_link->isOpen()) {
+            requestCmd(LtpCmd::REC_FORMAT, QByteArray(1, char(quint8(idx))), TagManual);
+            appendLog(QStringLiteral("[TX] формат записи → %1")
+                .arg(ui->cmbRecFormat->currentText()));
+        }
+    });
+
+    // Отображаемый текст SPI/МГц не обновлялся при переключении (жалоба
+    // 22.07.2026) — код на эти комбобоксы нигде не влияет, стороннего
+    // вмешательства не нашёл, но форсируем repaint() на смену индекса как
+    // защиту на случай платформенной особенности QComboBox+QSS.
+    // Режим SPI (22.07.2026) — ТОЛЬКО ручная проверка/сравнение в Сервисе
+    // (индекс combo 0=SPI/1=SPIx4 совпадает с payload[0] прошивки 1:1).
+    ui->comboSpiMode->setCurrentIndex(1);   // дефолт = SPIx4 (максимум); список остаётся для характеризации
+    connect(ui->comboSpiMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (idx < 0) return;
+        const quint8 payload = quint8(idx);
+        requestCmd(LtpCmd::FLASH_SET_SPI_MODE, QByteArray(1, char(payload)), TagManual);
+        appendLog(QStringLiteral("[Тест памяти] режим SPI → %1").arg(ui->comboSpiMode->currentText()));
+    });
+    connect(ui->comboSpiMhz, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (idx < 0) return;
+        requestCmd(LtpCmd::FLASH_SET_FREQ, QByteArray(1, char(quint8(idx))), TagManual);
+        appendLog(QStringLiteral("[Тест памяти] частота флеша → %1 МГц").arg(ui->comboSpiMhz->currentText()));
     });
 
     // ── Вкладка «Тест памяти»: базовые операции Flash (тег TagManual) ──────
@@ -656,7 +975,7 @@ void MainWindow::setupCore()
         // Ручное «Прочитать» — читаем ПОЛНЫЙ заданный диапазон «Старт»/«Страниц»
         // (явный override, без ограничения kAutoDumpMaxPages, которое действует
         // только на авто-дамп при входе/после стирания). (17.07.2026)
-        memTestDump(ui->spinMemStartPage->value(), qMax(1, ui->spinMemPages->value()));
+        memTestDump(ui->spinMemStartPage->value() - 1, qMax(1, ui->spinMemPages->value()));
     });
     // Кнопки стирания: подпись без номера страницы (адрес задаётся в параметрах)
     ui->btnMemErasePage->setText(QStringLiteral("⚠ Страница"));
@@ -665,6 +984,7 @@ void MainWindow::setupCore()
 
     connect(ui->btnMemErasePage, &QPushButton::clicked, this, [this, memLog] {
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        if (m_dataFlagSet && !m_test.running) { memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные»")); return; }
         // Идёт серия — второе нажатие ОСТАНАВЛИВАЕТ (17.07.2026). Раньше отмены
         // не было: случайный большой диапазон (термотест tempRunStart оставляет
         // «Страниц»=65536) вешал очередь на десятки тысяч поштучных команд без
@@ -681,7 +1001,7 @@ void MainWindow::setupCore()
         // Стираем «Страниц» страниц подряд от стартовой (02.07.2026 — раньше
         // стиралась только стартовая, поле «Страниц» игнорировалось; та же
         // семантика диапазона, что у «Запись»/«Чтение»: start..start+n-1).
-        const quint16 start = quint16(ui->spinMemStartPage->value());
+        const quint16 start = quint16(ui->spinMemStartPage->value() - 1);
         const int     n     = qMax(1, ui->spinMemPages->value());
         // Предохранитель от поштучного стирания огромного объёма (термотест
         // оставляет «Страниц»=65536 → тысячи медленных команд = зависание).
@@ -716,6 +1036,7 @@ void MainWindow::setupCore()
     });
     connect(ui->btnMemEraseChip, &QPushButton::clicked, this, [this, memLog] {
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        if (m_dataFlagSet) { memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные»")); return; }
         if (QMessageBox::question(this, QStringLiteral("Стереть чип"),
                 QStringLiteral("Стереть ВСЮ память? Операция до ~30 с."))
             != QMessageBox::Yes) return;
@@ -724,9 +1045,22 @@ void MainWindow::setupCore()
         setOpsEnabled(false);
         requestCmd(LtpCmd::FLASH_ERASE, {}, TagManual);
     });
+    // «Стереть данные» (0x2A) — перенесена из активации в «Тест памяти»
+    // (27.07.2026), третья после Запись/Чтение. Блокируется флагом непрочитанных.
+    connect(ui->btnMemEraseData, &QPushButton::clicked, this, [this, memLog] {
+        if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        if (m_dataFlagSet) { memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные» (активация)")); return; }
+        if (QMessageBox::question(this, QStringLiteral("Стирание данных"),
+                QStringLiteral("Стереть данные регистратора (NOR, со страницы 1)? Служебная "
+                    "страница 0 и счётчики перезапусков не затрагиваются."))
+            != QMessageBox::Yes) return;
+        memLog(QStringLiteral("[Стереть данные…]"));
+        requestCmd(LtpCmd::FLASH_ERASE_DATA, {}, TagManual);
+    });
     connect(ui->btnMemEraseSector, &QPushButton::clicked, this, [this, memLog] {
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
-        const quint16 sec = quint16(ui->spinMemStartPage->value() / 16);
+        if (m_dataFlagSet) { memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные»")); return; }
+        const quint16 sec = quint16((ui->spinMemStartPage->value() - 1) / 16);
         QByteArray p; p.append(char(sec & 0xFF)); p.append(char((sec >> 8) & 0xFF));
         memLog(QStringLiteral("[Стирание сектора %1 (стр. %2–%3)]")
                    .arg(sec).arg(sec * 16).arg(sec * 16 + 15));
@@ -736,6 +1070,11 @@ void MainWindow::setupCore()
     // Запись: первое нажатие — старт, повторное — стоп
     connect(ui->btnMemWrite, &QPushButton::clicked, this, [this, memLog, testByte] {
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        // Блокировка при непрочитанных данных (27.07.2026): запись разрушительна.
+        if (m_dataFlagSet && !(m_test.running && m_test.step == TestStep::Write)) {
+            memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные» (активация)"));
+            return;
+        }
         if (m_test.running && m_test.step == TestStep::Write) {
             // ── СТОП ──
             m_dev->clearQueue();
@@ -749,17 +1088,55 @@ void MainWindow::setupCore()
             return;
         }
         // ── СТАРТ ──
-        const quint16 start  = quint16(ui->spinMemStartPage->value());
+        const quint16 start  = quint16(ui->spinMemStartPage->value() - 1);
+        // Предупреждение (22.07.2026): страница 0 служебная (зарезервирована,
+        // см. FLASH_ERASE_DATA в прошивке — стирание всегда оставляет её
+        // нетронутой). Писать туда можно ТОЛЬКО вручную через «Запись»,
+        // остальные операции (Термотест, Образ) всегда стартуют минимум со
+        // страницы 1 (см. kLogStartPage) и сюда попасть не могут.
+        if (start == 0) {
+            if (QMessageBox::question(this, QStringLiteral("Запись на служебную страницу"),
+                    QStringLiteral("Страница 0 зарезервирована (служебная) — обычно её "
+                        "не трогают. Термотест и запись образа туда никогда не "
+                        "пишут. Продолжить запись именно сюда?"))
+                != QMessageBox::Yes) return;
+        }
+        // Предупреждение (22.07.2026, по обсуждению): запись НЕ на границе
+        // известной свободной страницы (m_firstFreePage) создаёт «остров»
+        // занятых страниц посреди свободного места — бинарный поиск
+        // (flashBinSearchStart) предполагает Flash заполненной СТРОГО ПОДРЯД
+        // от стр.1, и с таким «островом» дальше даёт непредсказуемый
+        // результат (следующая «Загрузка» может писать не туда). Тест —
+        // произвольный доступ по определению, к «Работе» не относится;
+        // просто спрашиваем подтверждение, не блокируем.
+        if (m_firstFreePage >= 0 && start > quint16(m_firstFreePage)
+            && start > quint16(kLogStartPage)) {
+            if (QMessageBox::question(this, QStringLiteral("Запись не на границе"),
+                    QStringLiteral("Старт (стр.%1) дальше первой свободной страницы "
+                        "(стр.%2) — между ними останется дыра. Это собьёт "
+                        "автопоиск свободного места для «Загрузка» образа "
+                        "(она может начать писать не туда). Продолжить?")
+                        .arg(start + 1).arg(m_firstFreePage + 1))
+                != QMessageBox::Yes) return;
+        }
         const int     n      = ui->spinMemPages->value();
         const int     cycles = ui->spinMemCycles->value();
         const quint8  b      = testByte();
         m_test = { true, n, 0, start, 0, TestStep::Write, cycles, 0 };
+        ui->lblMemSpeed->setText(QStringLiteral(" "));
         ui->btnMemWrite->setText(QStringLiteral("Запись ■"));
-        memLog(QStringLiteral("[Запись] стр.%1..%2 <- 0x%3 x256 (%4 стр. × %5 цикл.)")
+        memLog(QStringLiteral("[Запись] стр.%1..%2 <- 0x%3 x256 (%4 стр. × %5 цикл.), "
+                               "с контролем чтением после каждой страницы")
                    .arg(start).arg(start + n - 1)
                    .arg(b, 2, 16, QLatin1Char('0')).arg(n).arg(cycles));
         setOpsEnabled(false, ui->btnMemWrite);
         memTestUpdateUi();
+        // Пара «записать страницу → сразу прочитать её же обратно» (22.07.2026,
+        // по просьбе: раньше «Запись» не проверяла себя вообще, ошибку ловило
+        // только отдельное «Чтение»). TagWriteVerify — отдельный тег для этого
+        // контрольного чтения, чтобы не путать со standalone «Чтение» (TagManual).
+        // При расхождении обработчик FLASH_READ/TagWriteVerify чистит очередь
+        // (m_dev->clearQueue()) — дальнейшие страницы уже не запишутся.
         for (int c = 0; c < cycles; ++c)
             for (int i = 0; i < n; ++i) {
                 const quint16 pg = quint16(start + i);
@@ -767,6 +1144,12 @@ void MainWindow::setupCore()
                 p.append(char(pg & 0xFF)); p.append(char((pg >> 8) & 0xFF));
                 p.append(QByteArray(256, char(b)));
                 m_dev->enqueue(LtpCmd::FLASH_WRITE, p, TagManual);
+
+                const quint32 addr = quint32(pg) << 8;
+                QByteArray rp;
+                for (int j = 0; j < 4; ++j) rp.append(char((addr >> (8*j)) & 0xFF));
+                for (int j = 0; j < 4; ++j) rp.append(char((256   >> (8*j)) & 0xFF));
+                m_dev->enqueue(LtpCmd::FLASH_READ, rp, TagWriteVerify);
             }
     });
     // Чтение: первое нажатие — старт, повторное — стоп
@@ -785,10 +1168,11 @@ void MainWindow::setupCore()
             return;
         }
         // ── СТАРТ ──
-        const quint16 start  = quint16(ui->spinMemStartPage->value());
+        const quint16 start  = quint16(ui->spinMemStartPage->value() - 1);
         const int     n      = ui->spinMemPages->value();
         const int     cycles = ui->spinMemCycles->value();
         m_test = { true, n, 0, start, 0, TestStep::Read, cycles, 0 };
+        ui->lblMemSpeed->setText(QStringLiteral(" "));
         ui->btnMemRead->setText(QStringLiteral("Чтение ■"));
         memLog(QStringLiteral("[Чтение] стр.%1..%2 (%3 стр. × %4 цикл.)")
                    .arg(start).arg(start + n - 1).arg(n).arg(cycles));
@@ -804,6 +1188,38 @@ void MainWindow::setupCore()
             }
     });
 
+    // Кнопка «Скорость» (26.07.2026): запускает замер записи; по ответу
+    // цепочка сама запустит замер чтения, итог — W/R в индикаторе.
+    connect(ui->btnSpeedTest, &QPushButton::clicked, this, [this, memLog] {
+        if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        // Эталон в КОНЦЕ памяти, размер зависит только от «Страниц» → сменили
+        // число страниц → переписать (03.08.2026: «Старт» на тест скорости не влияет).
+        if (m_speedRefReady && ui->spinMemPages->value() != m_speedRefPages)
+            m_speedRefReady = false;
+        if (!m_speedRefReady) {
+            // ЭТАЛОН пишем ОДИН раз за сессию на БЕЗОПАСНОЙ низкой частоте
+            // (10 МГц, quad) с verify — гарантируем корректную ground-truth в
+            // области. По успеху onResponse сам переключит на ВЫБРАННУЮ
+            // конфигурацию и запустит чтение по готовому.
+            {   const int n = qMax(1, ui->spinMemPages->value());
+                const int endStart = int(kFlashTotalPages) - n + 1;   // экранная стр. (адрес+1)
+                memLog(QStringLiteral("[Скорость] пишу эталон (10 МГц, quad) в КОНЦЕ памяти, стр.%1..%2…")
+                       .arg(endStart).arg(int(kFlashTotalPages))); }
+            m_speedPhase = 1;
+            requestCmd(LtpCmd::FLASH_SET_SPI_MODE, QByteArray(1, char(1)), TagManual);  // quad
+            requestCmd(LtpCmd::FLASH_SET_FREQ,     QByteArray(1, char(3)), TagManual);  // idx3 = 10 МГц
+            showMemSpeed(0);   // стирание + запись эталона + verify
+        } else {
+            // Эталон готов — применяем ВЫБРАННУЮ конфигурацию и только читаем+сверяем.
+            m_speedPhase = 2;
+            const quint8 spiIdx  = quint8(qMax(0, ui->comboSpiMode->currentIndex()));
+            const quint8 freqIdx = quint8(qMax(0, ui->comboSpiMhz->currentIndex()));
+            requestCmd(LtpCmd::FLASH_SET_SPI_MODE, QByteArray(1, char(spiIdx)),  TagManual);
+            requestCmd(LtpCmd::FLASH_SET_FREQ,     QByteArray(1, char(freqIdx)), TagManual);
+            showMemSpeed(1);
+        }
+    });
+
     // ── Образ RG / Образ LOG: запись образа в Flash из файла Intel HEX ───────
     // Раньше эти кнопки генерировали образ синтетически прямо в коде C++, по
     // устаревшему формату (30 байт/запись RG, block-float LOG) — он давно
@@ -814,6 +1230,12 @@ void MainWindow::setupCore()
                                            const QString &suggestedFile) {
         if (m_imgActiveBtn) { memLog(QStringLiteral("⚠ Образ: операция уже выполняется")); return; }
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        // Гейт «есть несохранённые данные» здесь СНЯТ (02.08.2026): запись образа
+        // неразрушающая — идёт с первой свободной страницы, старые данные не
+        // стираются (см. ниже, m_firstFreePage). Проверка «Сохранить» мешала в
+        // сервисе (напр. при загрузке тестового образа со стыками), а данным
+        // ничего не грозит. Гейты стирания/термотеста/активации оставлены —
+        // они реально разрушительны.
 
         QSettings st(kOrg, kApp);
         const QString lastDir = st.value(QStringLiteral("memtest/lastImgDir"),
@@ -832,38 +1254,44 @@ void MainWindow::setupCore()
             memLog(QStringLiteral("⚠ Образ: %1 — %2").arg(QFileInfo(path).fileName(), err));
             return;
         }
-        // Запись образа не подразумевает сохранение старых данных — сначала
-        // стираем весь чип целиком (решение 20.06.2026: старые данные на чипе
-        // путали разбор архива — см. лишние «оборванные» записи 20.06.2026).
-        // Параметры записи сохраняются, startImageWrite() запустится из
-        // обработчика FLASH_STATE (тег TagImg) по готовности стирания.
-        m_imgActiveBtn        = btn;   // блокирует повторный клик на время стирания+записи
-        m_imgPendingBtn       = btn;
-        m_imgPendingLabel     = btn->text();
-        m_imgPendingStartPage = startPage;
-        m_imgPendingPages     = pages;
-        m_imgPendingFileName  = QFileInfo(path).fileName();
-        // Индикация операции в верхних ячейках (02.07.2026, по запросу):
-        // «Задать» — план из файла (страниц/стартовая), ставится сразу;
-        // «Факт» — очищается и заполняется по ходу реальной записи
-        // (см. обработчик FLASH_WRITE/TagImg): счётчик записанных страниц
-        // растёт живьём, по завершении — итоговые значения (как и раньше,
-        // их же использует «Прочитать» как диапазон).
-        ui->lblImgPagesNA->setText(QString::number(pages.size()));
-        ui->lblImgAddrNA->setText(QString::number(startPage));
-        ui->lblImgPages->setText(QStringLiteral(" "));
-        ui->lblImgAddr->setText(QStringLiteral(" "));
-        setOpsEnabled(false);
-        btn->setText(QStringLiteral("⌛ стирание…"));
-        m_eraseStartMs = QDateTime::currentMSecsSinceEpoch();
+        // Пишем с ПЕРВОЙ СВОБОДНОЙ страницы (22.07.2026, по просьбе) — старые
+        // данные больше не стираются автоматом, образ дописывается после них.
+        // m_firstFreePage поддерживается живым сканированием (flashBinSearchStart,
+        // см. подключение/после операций) — если ещё не известно, просим
+        // подождать/переподключиться, а не гадаем стартовую страницу.
+        if (m_firstFreePage < 0) {
+            memLog(QStringLiteral("⚠ Образ: первая свободная страница ещё не известна — "
+                                   "подождите сканирование Flash и повторите"));
+            return;
+        }
+        if (m_firstFreePage >= int(kFlashTotalPages)) {
+            memLog(QStringLiteral("⚠ Образ: свободного места нет — Flash полностью занята"));
+            return;
+        }
+        if (m_firstFreePage + pages.size() > int(kFlashTotalPages)) {
+            memLog(QStringLiteral("⚠ Образ: недостаточно свободного места (нужно %1 стр., "
+                                   "доступно %2 стр. с текущей позиции)")
+                       .arg(pages.size()).arg(int(kFlashTotalPages) - m_firstFreePage));
+            return;
+        }
+        startPage = quint16(qMax(int(m_firstFreePage), int(kLogStartPage)));
+        // «Адрес» (Данные) — реальный адрес операции, как и раньше.
+        ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(startPage) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
+        // «Старт»/«Страниц» (Проверка) — теперь и образ отображает ход здесь
+        // (22.07.2026, по просьбе, тот же принцип, что у термотеста): Задать —
+        // первая свободная страница / количество страниц образа, Факт —
+        // текущая активная страница / сколько обработано (см. обработчик
+        // FLASH_WRITE, тег TagImg).
+        ui->spinMemStartPage->setValue(startPage + 1);
+        ui->spinMemPages->setValue(int(pages.size()));
         appendLog(QStringLiteral(
-            "[Образ] %1 — сначала стираю весь чип (без сохранения старых данных), "
-            "затем запись стр.%2..%3 (%4 стр.)")
-                .arg(m_imgPendingFileName)
-                .arg(startPage)
-                .arg(startPage + pages.size() - 1)
+            "[Образ] %1 — первая свободная стр.%2, пишу стр.%2..%3 (%4 стр.), "
+            "старые данные сохраняются")
+                .arg(QFileInfo(path).fileName())
+                .arg(startPage + 1)
+                .arg(startPage + pages.size())
                 .arg(pages.size()));
-        requestCmd(LtpCmd::FLASH_ERASE, {}, TagImg);
+        startImageWrite(btn, btn->text(), startPage, pages, QFileInfo(path).fileName());
     };
 
     connect(ui->btnImgRG, &QPushButton::clicked, this, [this, loadImageButton] {
@@ -879,6 +1307,9 @@ void MainWindow::setupCore()
     connect(ui->btnTempRun, &QPushButton::clicked, this, [this, memLog] {
         if (m_tempRun.running) { tempRunStop(); return; }
         if (!m_link->isOpen()) { memLog(QStringLiteral("⚠ Нет подключения")); return; }
+        // Термотест пишет во Flash → как стирание/активация, блокируем при
+        // взведённом флаге несохранённых данных (28.07.2026, был пропущен гейт).
+        if (m_dataFlagSet) { memLog(QStringLiteral("⚠ Есть несохранённые данные — сначала «Сохранить данные»")); return; }
         tempRunStart();
     });
     m_tempPollTimer.setSingleShot(false);
@@ -914,19 +1345,30 @@ void MainWindow::setupCore()
                 });
             return;
         }
-        if (m_act.step == ActStep::Idle
-                || m_act.step == ActStep::Done
-                || m_act.step == ActStep::Error)
-            activationStart();
-        else
+        // «Активировать» (27.07.2026): ЗЕЛЁНАЯ ВОЛНА — полная пошаговая
+        // активация (блок «Проверка устройства»): Считать данные → Проверка
+        // устройства → Синхро время → Стереть → Тестовая запись → Постановка на
+        // готовность. Каждый пройденный сегмент зеленеет; финал взводит
+        // персистентный флаг активации + ts (стр.121/122). Повторное нажатие
+        // (■) во время прогона — стоп.
+        if (m_act.step != ActStep::Idle && m_act.step != ActStep::Done
+                && m_act.step != ActStep::Error) {
             activationStop();
+            return;
+        }
+        if (QMessageBox::question(this, QStringLiteral("Активация"),
+                QStringLiteral("Запустить активацию устройства? Будет выполнена проверка "
+                    "(считывание/сохранение данных, датчики, время), стирание памяти "
+                    "и постановка на готовность."))
+            != QMessageBox::Yes) return;
+        activationStart();
     });
-
-    // Колонки 1 и 2 в groupMemParams — одинаковая ширина
-    // Ограничиваем виджеты col-1, иначе спинбоксы растягиваются и «съедают» col-2
-    for (QSpinBox *sb : ui->groupMemParams->findChildren<QSpinBox*>())
-        sb->setMaximumWidth(90);
-    ui->editTestByte->setMaximumWidth(90);
+    // Ширина всех боксов «Проверка» задана явно в .ui (50px, единообразно
+    // для обеих колонок) — раньше здесь стоял код, перезаписывавший col-1
+    // (QSpinBox/editTestByte) поверх этого значением 90px, из-за чего
+    // «Задать» и «Факт» визуально расходились по ширине (22.07.2026, найдено
+    // по жалобе на разную ширину столбцов). Тот код был актуален во времена
+    // 66px-боксов без явных ограничений в .ui — сейчас не нужен, убран.
     ui->memParamsGrid->setColumnStretch(1, 1);
     ui->memParamsGrid->setColumnStretch(2, 1);
 
@@ -958,6 +1400,7 @@ void MainWindow::setupCore()
                 // Границы уже известны и новый поиск не стартовал — дампим сразу.
                 if (!m_binSearch.running && m_firstFreePage >= 0) {
                     m_memAutoDumpPending = false;
+                    m_silentDump = true;
                     memTestDump();
                 }
             }
@@ -988,6 +1431,17 @@ void MainWindow::setupCore()
             m_dev->enqueue(LtpCmd::FLASH_ON, {}, TagManual);
             probeFlashImageState();   // «Содержимое» в панели «Память устройства»
             flashBinSearchStart();
+        }
+        // «Калибровка»: калибровка скорости + текущая поправка RTC.
+        if (m_link->isOpen() && ui->tabsMain->currentWidget() == ui->tabCalibration) {
+            m_dev->enqueue(LtpCmd::SPEED_CAL_GET, {}, TagManual);
+            m_dev->enqueue(LtpCmd::RTC_CALIB_GET, {}, TagManual);
+        }
+        // «FLASH STM»: состояние активации (GET_STATS) + история активаций (0x2E).
+        if (m_link->isOpen() && ui->tabsMain->currentWidget() == ui->tabFlashStm) {
+            m_dev->enqueue(LtpCmd::GET_STATS, {}, TagManual);
+            m_dev->enqueue(LtpCmd::ACT_HISTORY, {}, TagManual);
+            m_dev->enqueue(LtpCmd::PASSPORT_GET, {}, TagManual);   // паспорт стр.123 → поля
         }
     });
 
@@ -1029,6 +1483,196 @@ void MainWindow::requestCmd(quint8 cmd, const QByteArray &payload, quint32 tag)
         appendLog(QStringLiteral("Нет связи — автоподключение…"));
         onScanClicked();
     }
+}
+
+// Ячейка таблицы калибровки скорости: число выровнено ВПРАВО (при одинаковом
+// числе десятичных знаков в столбце цифры встают под цифрами). editable=false —
+// производный/справочный столбец (не редактируется вручную).
+void MainWindow::speedCalSetCell(int row, int col, const QString &text, bool editable)
+{
+    auto *it = new QTableWidgetItem(text);
+    it->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    if (!editable) it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+    ui->tblSpeedCal->setItem(row, col, it);
+}
+
+// Пересчитать производные столбцы строки по задано(0)/измерено(1):
+//   [2] Δ% = (измерено−задано)/задано·100   [4] Коэфф. новый = задано/измерено.
+// [3] «Коэфф. в работе» не трогаем — это значение, действующее на устройстве.
+void MainWindow::speedCalRecompute(int row)
+{
+    auto txt = [this, row](int c){ auto *it = ui->tblSpeedCal->item(row, c);
+        return it ? it->text().trimmed() : QString(); };
+    const double given = txt(0).toDouble();       // задано
+    const QString mtxt = txt(1);
+    const double meas  = mtxt.toDouble();          // измерено = сырое × текущий
+    double cur = txt(2).toDouble(); if (cur <= 0.0) cur = 1.0;   // текущий (кол.2, дефолт 1)
+    if (mtxt.isEmpty() || meas <= 0.0 || given <= 0.0) {         // нет измерения → пусто
+        speedCalSetCell(row, 3, QString(), false);   // Δ изм
+        speedCalSetCell(row, 4, QString(), false);   // новый
+        speedCalSetCell(row, 5, QString(), false);   // Δ расч
+        return;
+    }
+    const double dizm = (meas - given) / given * 100.0;         // Δ изм: остаточное отклонение с ТЕКУЩИМ коэфф
+    const double koef = cur * given / meas;                     // новый = текущий×задано/измерено = задано/сырое
+    const double raw  = meas / cur;                             // сырое = измерено/текущий
+    const double drasch = (raw * koef - given) / given * 100.0; // Δ расч: остаточное с НОВЫМ коэфф (≈0 = минимум)
+    speedCalSetCell(row, 3, QString::number(dizm,   'f', 1), false);
+    speedCalSetCell(row, 4, QString::number(koef,   'f', 3), false);
+    speedCalSetCell(row, 5, QString::number(drasch, 'f', 1), false);
+}
+
+// Заполнить строку целиком: задано/измерено (редактируемые) + коэфф. в работе
+// (справочный, с устройства), затем пересчитать производные Δ%/коэфф. новый.
+void MainWindow::speedCalSetRow(int row, double given, double measured, double workKoef)
+{
+    QSignalBlocker b(ui->tblSpeedCal);
+    speedCalSetCell(row, 0, QString::number(given,    'f', 1), true);
+    speedCalSetCell(row, 1, QString::number(measured, 'f', 1), true);
+    speedCalSetCell(row, 2, QString::number(workKoef, 'f', 3), false);   // текущий
+    speedCalRecompute(row);
+}
+
+// ── Авто-калибровка скорости: стенд по столбцу «Задано», живой опрос гироскопа ─
+static constexpr int kSpeedCalSettleMs = 4500;   // разгон/устаканивание на ступени (дольше — стабильнее)
+static constexpr int kSpeedCalMeasMs   = 5000;   // окно измерения гироскопом
+static constexpr int kSpeedCalTickMs   = 100;    // период тика/опроса (чаще → больше выборок)
+
+void MainWindow::speedCalAutoStart()
+{
+    if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+    const int n = ui->tblSpeedCal->rowCount();
+    if (n < 1) { appendLog(QStringLiteral("⚠ Таблица пуста — задайте скорости в «Задано»")); return; }
+    QVector<double> targets;
+    for (int i = 0; i < n; ++i) {
+        auto *it = ui->tblSpeedCal->item(i, 0);
+        const double v = it ? it->text().trimmed().toDouble() : 0.0;
+        if (v <= 0.0) { appendLog(QStringLiteral("⚠ Строка %1: «Задано» не число").arg(i+1)); return; }
+        targets << v;
+    }
+    if (QMessageBox::question(this, QStringLiteral("Калибровка скорости"),
+            QStringLiteral("Прогнать стенд по %1 скоростям и измерить гироскопом?\n"
+                           "Мотор будет вращаться.").arg(n)) != QMessageBox::Yes) return;
+
+    m_dev->enqueue(LtpCmd::GYRO_GET_FS, {}, TagMon);   // чувствительность гироскопа (raw→°/с)
+
+    m_speedCal.running = true;
+    m_speedCal.targets = targets;
+    m_speedCal.curRow  = 0;
+    m_speedCal.phase   = 0;
+    m_speedCal.phaseMs = 0;
+    m_speedCal.samples.clear();
+    ui->btnSpeedCalAuto->setText(QStringLiteral("Стоп"));
+    appendLog(QStringLiteral("[Калибровка] старт: %1 ступеней").arg(n));
+
+    auto sendSpeed = [this](double rpm) {
+        const quint16 s = quint16(qRound(rpm));
+        QByteArray p(3, 0);
+        p[0] = char(s & 0xFF); p[1] = char((s >> 8) & 0xFF); p[2] = char(kStendMicrostepCoef);
+        m_dev->enqueueTo(LtpAddr::STEND, LtpCmd::STEND_SPEED, p, TagStend);
+        return s;
+    };
+    const quint16 s0 = sendSpeed(targets[0]);
+    appendLog(QStringLiteral("[Калибровка] ступень 1/%1: задано %2 об/мин").arg(n).arg(s0));
+    m_speedCalTimer.start(kSpeedCalTickMs);
+}
+
+void MainWindow::speedCalAutoTick()
+{
+    if (!m_speedCal.running) return;
+    m_speedCal.phaseMs += kSpeedCalTickMs;
+
+    // Мигание текущей ступени (~2.5 Гц): видно, где идёт проход.
+    { QSignalBlocker b(ui->tblSpeedCal);
+      speedCalClearHighlight();
+      const bool on = (m_speedCal.phaseMs / 400) % 2 == 0;
+      speedCalHighlightRow(m_speedCal.curRow, on, m_speedCal.phase); }
+
+    if (m_speedCal.phase == 0) {                       // разгон/устаканивание
+        if (m_speedCal.phaseMs >= kSpeedCalSettleMs) {
+            m_speedCal.phase = 1; m_speedCal.phaseMs = 0;
+            m_speedCal.samples.clear();
+        }
+        return;
+    }
+    // phase 1 — измерение: опрашиваем гироскоп (ответы копит speedCalAutoAccum)
+    m_dev->enqueue(LtpCmd::GET_AXES_RAW, {}, TagSpeedCal);
+    if (m_speedCal.phaseMs < kSpeedCalMeasMs) return;
+
+    const int row = m_speedCal.curRow;
+    // Усечённое среднее: сортируем, отбрасываем по 20% с краёв (выбросы/дрожь
+    // разгона) → устойчивая оценка сырой об/мин, лучше повторяемость.
+    double raw = 0.0;
+    if (!m_speedCal.samples.isEmpty()) {
+        std::sort(m_speedCal.samples.begin(), m_speedCal.samples.end());
+        const int n = m_speedCal.samples.size();
+        const int lo = n / 5, hi = n - n / 5;          // серединные 60%
+        double sum = 0.0; int cnt = 0;
+        for (int k = lo; k < hi; ++k) { sum += m_speedCal.samples[k]; ++cnt; }
+        raw = (cnt > 0) ? sum / cnt : m_speedCal.samples[n/2];
+    }
+    { QSignalBlocker b(ui->tblSpeedCal);
+      auto *ic = ui->tblSpeedCal->item(row, 2);         // текущий (кол.2)
+      double cur = ic ? ic->text().trimmed().toDouble() : 0.0; if (cur <= 0.0) cur = 1.0;
+      const double meas = raw * cur;                    // измерено = сырое × текущий
+      speedCalSetCell(row, 1, QString::number(meas, 'f', 1), true);
+      speedCalRecompute(row); }
+    appendLog(QStringLiteral("[Калибровка] ступень %1: сырое %2 об/мин (%3 выборок, усеч.)")
+                  .arg(row+1).arg(raw, 0, 'f', 1).arg(m_speedCal.samples.size()));
+
+    if (row + 1 >= m_speedCal.targets.size()) { speedCalAutoStop(true); return; }
+    m_speedCal.curRow = row + 1;
+    m_speedCal.phase = 0; m_speedCal.phaseMs = 0;
+    const quint16 s = quint16(qRound(m_speedCal.targets[m_speedCal.curRow]));
+    QByteArray p(3, 0);
+    p[0] = char(s & 0xFF); p[1] = char((s >> 8) & 0xFF); p[2] = char(kStendMicrostepCoef);
+    m_dev->enqueueTo(LtpAddr::STEND, LtpCmd::STEND_SPEED, p, TagStend);
+    appendLog(QStringLiteral("[Калибровка] ступень %1/%2: задано %3 об/мин")
+                  .arg(m_speedCal.curRow+1).arg(m_speedCal.targets.size()).arg(s));
+}
+
+void MainWindow::speedCalAutoStop(bool finished)
+{
+    if (!m_speedCal.running) return;
+    m_speedCalTimer.stop();
+    m_speedCal.running = false;
+    { QSignalBlocker b(ui->tblSpeedCal); speedCalClearHighlight(); }   // снять подсветку
+    m_dev->enqueueTo(LtpAddr::STEND, LtpCmd::STEND_STOP, {}, TagStend);   // остановить мотор
+    ui->btnSpeedCalAuto->setText(QStringLiteral("Калибровать"));
+    appendLog(finished ? QStringLiteral("[Калибровка] завершено — проверьте таблицу и «Записать»")
+                       : QStringLiteral("[Калибровка] прервано"));
+}
+
+void MainWindow::speedCalAutoAccum(const QByteArray &payload)
+{
+    if (!m_speedCal.running || m_speedCal.phase != 1) return;
+    if (payload.size() < 7 || quint8(payload[0]) != 0) return;
+    const auto *d = reinterpret_cast<const quint8 *>(payload.constData());
+    qint16 gx, gy, gz;
+    std::memcpy(&gx, d + 1, 2); std::memcpy(&gy, d + 3, 2); std::memcpy(&gz, d + 5, 2);
+    double sens = double(m_mon.gyroSens_mdps);          // mdps/LSB
+    if (sens <= 0.0) sens = 70.0;                       // fallback ±2000 dps
+    const double dps = std::sqrt(double(gx)*gx + double(gy)*gy + double(gz)*gz) * sens / 1000.0;
+    m_speedCal.samples.append(dps / 6.0);               // °/с → об/мин (выборка)
+}
+
+// Подсветка текущей ступени калибровки: разгон — янтарный, измерение — зелёный.
+// on=false — снять (для мигания). Сигналы таблицы блокируем у вызывающего.
+void MainWindow::speedCalHighlightRow(int row, bool on, int phase)
+{
+    if (row < 0 || row >= ui->tblSpeedCal->rowCount()) return;
+    const QBrush br = on ? QBrush(phase == 1 ? QColor(0x2E, 0x7D, 0x32)   // измерение
+                                             : QColor(0x9A, 0x7B, 0x1A))  // разгон
+                         : QBrush();
+    for (int c = 0; c < ui->tblSpeedCal->columnCount(); ++c)
+        if (auto *it = ui->tblSpeedCal->item(row, c)) it->setBackground(br);
+}
+
+void MainWindow::speedCalClearHighlight()
+{
+    for (int r = 0; r < ui->tblSpeedCal->rowCount(); ++r)
+        for (int c = 0; c < ui->tblSpeedCal->columnCount(); ++c)
+            if (auto *it = ui->tblSpeedCal->item(r, c)) it->setBackground(QBrush());
 }
 
 void MainWindow::onScanClicked()
@@ -1128,10 +1772,13 @@ void MainWindow::onScanFinished(const QString &foundPort)
 
     // Паспорт устройства (начало; полный алгоритм §2.6 — этап 3)
     m_dev->enqueue(LtpCmd::WHO_AM_I);
+    m_dev->enqueue(LtpCmd::DATA_FLAG, QByteArray(1, char(0)));   // прочитать флаг непрочитанных → покрасить сегмент 0
     m_dev->enqueue(LtpCmd::GET_DATETIME);
     m_dev->enqueue(dashboardTempCmd());
     m_dev->enqueue(LtpCmd::GET_TEMP_STM);   // питание VDD сразу при подключении
     m_dev->enqueue(LtpCmd::GET_STATS);       // наработка, даты циклов, перезапуски
+    m_dev->enqueue(LtpCmd::REC_FORMAT,        // формат записи цикла из настроек → в прибор
+                   QByteArray(1, char(quint8(ui->cmbRecFormat->currentIndex()))));
 
     // Сразу при подключении — включить Flash и проверить, что в ней лежит
     // (Регистратор/Logger/пусто), чтобы подпись в заголовке окна не ждала
@@ -1252,6 +1899,71 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         return;
     }
 
+    // Постраничное сохранение образа в шаге 1 активации (27.07.2026). Читаем
+    // страницы подряд, пока не встретим полностью пустую (0xFF — конец лога:
+    // журнал непрерывен) или не упрёмся в конец чипа. Затем пишем единый Intel
+    // HEX и продолжаем волну. Сырые байты — формат один для Регистратора и
+    // Логгера (декодирует потом отдельный формирователь отчётов).
+    if (tag == TagActDump) {
+        if (cmd != LtpCmd::FLASH_READ) return;   // ждём только страницы
+        const auto *pd = reinterpret_cast<const quint8 *>(payload.constData());
+        if (payload.size() < 2 || pd[0] != 0) {
+            activationFail(QStringLiteral("сохранение образа: ошибка чтения страницы"));
+            return;
+        }
+        QByteArray page = payload.mid(1);
+        if (page.size() < 256) page.append(QByteArray(256 - page.size(), char(0xFF)));
+        else if (page.size() > 256) page.truncate(256);
+        bool allFF = true;
+        for (char c : page) if (quint8(c) != 0xFF) { allFF = false; break; }
+        const bool finish = allFF || (int(m_actDump.page) + 1 >= int(m_actDump.pageEnd));
+        if (!allFF) m_actDump.buf.append(page);
+        if (!finish) {
+            ++m_actDump.page;
+            const quint32 addr = quint32(m_actDump.page) << 8;
+            QByteArray p;
+            for (int j = 0; j < 4; ++j) p.append(char((addr >> (8*j)) & 0xFF));
+            for (int j = 0; j < 4; ++j) p.append(char((256  >> (8*j)) & 0xFF));
+            m_dev->enqueue(LtpCmd::FLASH_READ, p, TagActDump);
+            ui->lblActStatus->setText(QStringLiteral("Шаг 1: сохранение образа… стр.%1")
+                .arg(int(m_actDump.page) - int(m_actDump.startPage) + 1));
+            return;
+        }
+        m_actDump.running = false;
+        const bool wave = m_actDump.continueWave;
+        // Пустой образ (все страницы 0xFF): данных нет — писать нечего, но флаг
+        // всё равно сбрасываем (нечего терять) и, если в волне, идём дальше.
+        if (m_actDump.buf.isEmpty()) {
+            appendLog(wave ? QStringLiteral("[ACT] Шаг 1: данных нет — сохранять нечего")
+                           : QStringLiteral("[Сохранить] данных нет — сохранять нечего"));
+            requestCmd(LtpCmd::DATA_FLAG, QByteArray(1, char(wave ? 2 : 3)), TagManual);
+            if (wave) activationBeginStep(ActStep::Check);
+            else      requestCmd(LtpCmd::GET_STATS, {}, TagManual);   // обновить «Активация»
+            return;
+        }
+        QString err;
+        if (!saveImageToHexFile(m_actDump.path, m_actDump.startPage, m_actDump.buf, err)) {
+            if (wave) activationFail(QStringLiteral("сохранение образа: %1").arg(err));
+            else      appendLog(QStringLiteral("[Сохранить] ошибка записи файла: %1").arg(err));
+            return;
+        }
+        appendLog(QStringLiteral("[%1] образ сохранён (%2 стр.): %3")
+            .arg(wave ? QStringLiteral("ACT") : QStringLiteral("Сохранить"))
+            .arg(m_actDump.buf.size() / 256).arg(m_actDump.path));
+        // Данные на диске → СОХРАНЕНИЕ РЕЗУЛЬТАТА закрывает «жизнь»: 0x30=3 С ts
+        // (прошивка пишет END в стр.121 ТОЛЬКО при наличии ts — раньше слали без
+        // ts, и END не писался → история копила одни «начала»). И в волне (при
+        // активации сохраняем прошлые данные → END старой жизни, START новой даст
+        // шаг 7), и в standalone. 03.08.2026.
+        {   QByteArray p; p.append(char(3));
+            const quint32 nowTs = quint32(QDateTime::currentSecsSinceEpoch());
+            for (int j = 0; j < 4; ++j) p.append(char((nowTs >> (8*j)) & 0xFF));
+            requestCmd(LtpCmd::DATA_FLAG, p, TagManual); }
+        if (wave) activationBeginStep(ActStep::Check);
+        else      requestCmd(LtpCmd::GET_STATS, {}, TagManual);   // обновить «Активация»
+        return;
+    }
+
     // Любой дошедший сюда ответ — от регистратора (0x8D): если он числился
     // пропавшим в режиме A (m_regAwol после таймаута 0x22), значит вернулся
     // (питание/тумблер перещёлкнули) — возобновляем обычные опросы.
@@ -1298,6 +2010,8 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             // в com.c → перешил → тут сразу новое число = прошивка обновилась.
             if (payload.size() >= 6) {
                 // Версия = ВРЕМЯ СБОРКИ прошивки: [1]=ГГ [2]=ММ [3]=ДД [4]=ЧЧ [5]=ММ.
+                // Отображаем ГОД-ПЕРВЫМ: ГГ.ММ.ДД  ЧЧ.ММ — так строка сортируется
+                // хронологически (28.07.2026: год-первым верно, откат дневного порядка).
                 const int yy = d[1], mm = d[2], dd = d[3], hh = d[4], mi = d[5];
                 const QString ver = QStringLiteral("%1.%2.%3  %4.%5")
                     .arg(yy,2,10,QLatin1Char('0')).arg(mm,2,10,QLatin1Char('0'))
@@ -1318,9 +2032,12 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 ui->lblFwVersion->setText(QStringLiteral("нет (старая прошивка)"));
                 appendLog(QStringLiteral("[RX] прошивка не сообщает версию (старая — без поля версии)"));
             }
-            // Дублирующую надпись «LOGLSMA-регистратор · ПО от …» в верхней
-            // панели убрали (18.07.2026) — имя и версия есть в «Параметрах
-            // регистратора» на «Данные», карточка сверху остаётся пустой.
+            // ОБЕ версии — в ЗАГОЛОВКЕ окна, в одну строку: приложение (W) и
+            // прошивка (A). Нижнюю панель версии убрали; карточка сверху пустая.
+            setWindowTitle(QStringLiteral("LogLSMW %1      ·      %2  %3")
+                .arg(qApp->applicationVersion(),
+                     ui->lblDevName->text().trimmed(),
+                     ui->lblFwVersion->text()));
             ui->lblDevCard->clear();
             appendLog(QStringLiteral("[RX] WHO_AM_I 0x%1 — %2")
                           .arg(id, 2, 16, QLatin1Char('0')).arg(imu));
@@ -1335,6 +2052,24 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         ui->lblDevDateTime->setText(
             devDt.toString(QStringLiteral("HH:mm:ss  dd/MM/yyyy")));
 
+        // «Стоп» грубой калибровки RTC (03.08.2026): дрейф по интервалу выдержки.
+        if (tag == TagRtcCalStop && m_rtcCalActive) {
+            m_rtcCalActive = false;
+            const double elPc  = double(m_rtcCalT0.secsTo(QDateTime::currentDateTime()));
+            const double elDev = double(m_rtcCalT0.secsTo(devDt));
+            if (elPc >= 1.0) {
+                const double resid = (elDev - elPc) / elPc * 1e6;   // дрейф устройства, ppm (+ спешит)
+                m_rtcCalNewPpm = m_rtcCurPpm - resid;               // новая поправка = текущая − остаточный дрейф
+                ui->lblRtcCalStatus->setText(QStringLiteral("Выдержка %1 c: дрейф %2 ppm → новая поправка %3 ppm")
+                    .arg(qint64(elPc)).arg(resid, 0, 'f', 1).arg(m_rtcCalNewPpm, 0, 'f', 1));
+                ui->btnRtcCalApply->setEnabled(true);
+                appendLog(QStringLiteral("[RTC-калибровка] выдержка %1 c, дрейф %2 ppm, новая поправка %3 ppm")
+                    .arg(qint64(elPc)).arg(resid, 0, 'f', 1).arg(m_rtcCalNewPpm, 0, 'f', 1));
+            } else {
+                ui->lblRtcCalStatus->setText(QStringLiteral("Слишком короткая выдержка — повторите с большим интервалом"));
+            }
+        }
+
         // Лог только при ручном запросе (btnGetTime / контрольное чтение после btnSyncTime)
         if (tag == TagSyncTime)
             appendLog(QStringLiteral("[RX] GET_DATETIME → %1")
@@ -1346,12 +2081,39 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         const qint64 ad    = qAbs(diff);
         const qint64 alarm = qint64(ui->spinTimeAlarm->value()) * 60;
 
-        if (m_actSyncPending) {
+        // Панель «Часы RTC» на «Калибровке» (03.08.2026).
+        ui->lblRtcDevTime->setText(devDt.toString(QStringLiteral("HH:mm:ss  dd.MM.yyyy")));
+        ui->lblRtcPcTime->setText(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss  dd.MM.yyyy")));
+        ui->lblRtcDrift->setText(!devDt.isValid()
+            ? QStringLiteral("часы недостоверны")
+            : QStringLiteral("%1%2 с").arg(diff > 0 ? QStringLiteral("+") : QString()).arg(diff));
+
+        // «Синхро время» = сегмент 2. Резолвим ТОЛЬКО на КОНТРОЛЬНОМ чтении после
+        // SET (tag==TagSyncTime) — иначе фоновый GET_DATETIME (~1 Гц) сбросил бы
+        // pending до-синхронно и показал бы старое расхождение. (02.08.2026)
+        if (m_actSyncPending && tag == TagSyncTime) {
             m_actSyncPending = false;
-            // Успех одиночного клика — ОСТАЁТСЯ жёлтым (Active), не Done.
             activationSetSectorMinDelay(2, (ad <= 1)
                 ? ActivationBar::SectorState::Active
                 : ActivationBar::SectorState::Error, m_actSyncActiveMs);
+        } else if (!m_actSyncPending) {
+            // ЖИВОЙ индикатор «Синхро время» (сегмент 2), как WDT: сразу по
+            // состоянию, в ОБОИХ режимах — часы в допуске → жёлтый, разошлись/
+            // недостоверны → красный. КРИТИЧНО: это же снимает Disabled → сегмент
+            // становится кликабельным (ActivationBar::mousePressEvent игнорирует
+            // Disabled; из-за этого «Синхро» и не нажималась). Вне активной волны.
+            // Клик в операторе блокирован гейтом. Зелёный — только из волны. (02.08.2026)
+            const bool waveActive = (m_act.step != ActStep::Idle
+                                  && m_act.step != ActStep::Done
+                                  && m_act.step != ActStep::Error);
+            if (!waveActive) {
+                const bool okSync = (devDt.isValid() && ad <= alarm);
+                if (!okSync)
+                    activationSetSector(2, ActivationBar::SectorState::Idle);   // красный — рассинхрон (всегда)
+                else if (m_act.step != ActStep::Done)
+                    activationSetSector(2, ActivationBar::SectorState::Active); // жёлтый — синхронно (вне пост-волны)
+                // okSync && Done → НЕ трогаем: держим ЗЕЛЁНЫЙ от завершённой волны (03.08.2026)
+            }
         }
 
         m_timeAlarm = (ad > alarm) || !devDt.isValid();
@@ -1407,6 +2169,8 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         // эту же команду с тегом TagMon (см. monPoll()).
         if (tag == TagMon && m_mon.running && !m_mon.paused)
             monHandleAxes(payload);
+        if (tag == TagSpeedCal)               // авто-калибровка: накопить измеренную об/мин
+            speedCalAutoAccum(payload);
         break;
 
     case LtpCmd::ACC_GET_FS:    // cod|fullscale_g i32 LE — читается один раз при «Старт» Мониторинга
@@ -1442,7 +2206,7 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             if (isDashSensor) {                // на дашборд — только выбранный датчик
                 ui->lblTempCur->setText(QStringLiteral("%1 °C")
                                             .arg(double(t), 0, 'f', 1));
-                ui->lblTempCurCaption->setText(QStringLiteral("текущая · %1").arg(src));
+                ui->lblTempCurCaption->setText(QStringLiteral("текущая"));
             }
             // Вкладка «Команды»: метку трогает только ручной запрос,
             // фоновый опрос (питание/дашборд) её не перетирает.
@@ -1500,11 +2264,6 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     if (m_link->isOpen() && m_act.step == ActStep::Erase)
                         m_dev->enqueue(LtpCmd::FLASH_STATE, {}, TagAct);
                 });
-            } else if (tag == TagImg) {
-                // Автостирание перед записью образа (см. m_imgPending*) —
-                // WIP-опрос с тегом образа, запись начнётся по готовности.
-                appendLog(QStringLiteral("[Образ] стирание чипа запущено, ожидание…"));
-                requestCmd(LtpCmd::FLASH_STATE, {}, TagImg);
             } else {
                 // m_eraseStartMs уже записан в обработчике кнопки (до отправки команды)
                 ui->memReport->appendPlainText(QStringLiteral("Стирание запущено, ожидание…"));
@@ -1513,12 +2272,6 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         } else {
             if (tag == TagAct) {
                 activationFail(QStringLiteral("FLASH_ERASE: ошибка"));
-            } else if (tag == TagImg) {
-                appendLog(QStringLiteral("[Образ] стирание чипа: ошибка — запись образа отменена"));
-                if (m_imgPendingBtn) m_imgPendingBtn->setText(m_imgPendingLabel);
-                m_imgActiveBtn = nullptr;
-                m_imgPendingBtn = nullptr;
-                setOpsEnabled(true);
             } else {
                 ui->memReport->appendPlainText(QStringLiteral("Стирание чипа: ошибка"));
             }
@@ -1536,15 +2289,6 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                         if (m_link->isOpen() && m_act.step == ActStep::Erase)
                             m_dev->enqueue(LtpCmd::FLASH_STATE, {}, TagAct);
                     });
-                } else if (tag == TagImg) {
-                    if (m_imgPendingBtn)
-                        m_imgPendingBtn->setText(QStringLiteral("⌛ %1 с").arg(el));
-                    // Видимый прогресс в «Лог» — без него долгое FLASH_ERASE
-                    // (см. devicecontroller.h: «долго!») выглядит как зависание.
-                    appendLog(QStringLiteral("[Образ] стирание чипа… %1 с").arg(el));
-                    QTimer::singleShot(700, this, [this] {
-                        if (m_link->isOpen()) m_dev->enqueue(LtpCmd::FLASH_STATE, {}, TagImg);
-                    });
                 } else {
                     ui->memReport->appendPlainText(
                         QStringLiteral("  стирание… %1 с").arg(el));
@@ -1557,32 +2301,23 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 // Стирание завершено
                 m_erasing = false;
                 if (m_act.step == ActStep::Erase) {
-                    appendLog(QStringLiteral("[ACT] Шаг 4: чип стёрт"));
-                    activationSetSector(3, ActivationBar::SectorState::Done);
+                    appendLog(QStringLiteral("[ACT] Шаг 5: чип стёрт"));
+                    activationSetSector(4, ActivationBar::SectorState::Done);
                     activationBeginStep(ActStep::TestWrite);
-                } else if (tag == TagImg) {
-                    // Автостирание перед образом готово — теперь действительно
-                    // пишем образ из сохранённых m_imgPending* (см. loadImageButton).
-                    appendLog(QStringLiteral("[Образ] чип стёрт — начинаю запись образа"));
-                    m_flashImageState = FlashImageState::Empty;
-                    QPushButton *btn      = m_imgPendingBtn;
-                    const QString label   = m_imgPendingLabel;
-                    const quint16 sp      = m_imgPendingStartPage;
-                    const auto pages      = m_imgPendingPages;
-                    const QString fname   = m_imgPendingFileName;
-                    m_imgPendingBtn = nullptr;
-                    m_imgPendingPages.clear();
-                    if (btn) startImageWrite(btn, label, sp, pages, fname);
                 } else {
                     setOpsEnabled(true);
                     // Время стирания на этом чипе не измеряется достоверно
                     // (рапортует ~0) — не показываем «за N с», просто факт.
                     ui->memReport->appendPlainText(QStringLiteral("Чип стёрт"));
-                    // Сегмент активации «Стереть данные» — ОСТАЁТСЯ жёлтым
-                    // по факту одиночного стирания (21.07.2026, по замечанию:
-                    // зелёный — только когда пройдёт вся цепочка активации
-                    // целиком, единичное срабатывание = жёлтый навсегда).
-                    activationSetSector(0, ActivationBar::SectorState::Active);
+                    // Данных больше нет → перечитать флаг (прошивка A≥13:06 сбросила
+                    // его при стирании) и обновить сегмент «Сохранить»→«Сохранено».
+                    requestCmd(LtpCmd::DATA_FLAG, QByteArray(1, char(0)), TagManual);
+                    // Наработка (totalSec) обнуляется прошивкой при стирании чипа
+                    // (com.c) — перечитываем GET_STATS, иначе карточка «работа»
+                    // висит со старым (легаси-раздутым) значением. 03.08.2026.
+                    requestCmd(LtpCmd::GET_STATS, {}, TagManual);
+                    // (Одиночное стирание — из «Тест памяти»; ленту активации не
+                    // трогаем: «Стереть» теперь шаг 4 волны, а не сегмент 0.)
                     // Содержимое Flash изменилось — вкладка «Данные» до сих пор
                     // показывает результат предыдущего разбора (m_arc хранит его,
                     // ничего не сбрасывает). Перечитываем журнал заново, чтобы
@@ -1592,8 +2327,16 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     // подсветку снимаем сразу, без отдельного запроса.
                     m_flashImageState = FlashImageState::Empty;
                     refreshImgButtonsHighlight();
-                    // Чип полностью стёрт — первая свободная страница известна точно
-                    m_firstFreePage = int(kLogStartPage);
+                    // Чип полностью стёрт — ни одной непустой страницы,
+                    // первая свободная = внутренняя стр.0 → «Занято» = 0
+                    // (26.07.2026: занято = число непустых страниц от начала).
+                    m_firstFreePage = 0;
+                    // «Занято»/«Адрес» (22.07.2026) — этот путь идёт в обход
+                    // обработчика бинарного поиска (flashBinSearchSendNext), где
+                    // обычно обновляются эти поля — обновляем и здесь напрямую,
+                    // иначе после полного стирания там оставались старые значения.
+                    updateOccupiedLabel();
+                    ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(m_firstFreePage) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
                     // Наработка «Общая» = lifetime с устройства (источник — Flash).
                     // PC-снимок m_lastRegTotS был захвачен раньше и после стирания
                     // «висел» бы старым значением (04.07.2026, «а здесь осталось»).
@@ -1612,8 +2355,10 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     // (пусто) → memTestDump() попадёт в ветку «память пуста» и
                     // очистит txtHexDump. Гейты как у входа на вкладку.
                     if (ui->tabsMain->currentWidget() == ui->tabMemTest
-                        && !m_stendActive && !m_test.running)
+                        && !m_stendActive && !m_test.running) {
+                        m_silentDump = true;
                         memTestDump();
+                    }
                 }
             }
         }
@@ -1662,6 +2407,167 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             flashBinSearchStart();
         }
         break;
+    case LtpCmd::DATA_FLAG: {
+        // 03.08.2026: ответ 0x30 стал БИТОВОЙ МАСКОЙ (NOR стр.0 флаги, было булево):
+        // [0]=err, [1]=маска: 0x01 активирован (стр.121), 0x02 данные_есть, 0x04 сохранено.
+        if (payload.size() < 2) break;
+        const quint8 mask = quint8(payload.at(1));
+        m_deviceActivated = (mask & 0x01u);   // осн. признак — NOR-байт [1] стр.0
+        m_dataPresent = (mask & 0x02u);
+        m_dataSaved   = (mask & 0x04u);
+        // «Несохранённые данные» = данные в NOR есть И сохранение не выполнено.
+        m_dataFlagSet = m_dataPresent && !m_dataSaved;
+        // Красный «Сохранить» / зелёный «Сохранено» / жёлтый «Стёрто» (если Flash
+        // пуста) — единая логика в updateSaveSegment (флаг + занятость памяти).
+        updateSaveSegment();
+        updateActivationState();   // «между жизнями» ↔ «идёт жизнь» зависит от флага
+        break;
+    }
+    case LtpCmd::RTC_CALIB_GET: {
+        // 0x33: [0]=err, [1..4]=ppm float(LE) — текущая применённая поправка RTC.
+        if (payload.size() < 5 || d[0] != 0) break;
+        float ppm; std::memcpy(&ppm, d + 1, 4);
+        m_rtcCurPpm = double(ppm);
+        ui->lblRtcCurPpm->setText(QStringLiteral("%1 ppm").arg(double(ppm), 0, 'f', 1));
+        break;
+    }
+    case LtpCmd::SPEED_CAL_GET: {
+        // 0x2F: [0]=err, [1]=n, далее n×[ r float(LE) | k float(LE) ].
+        if (payload.size() < 2 || d[0] != 0) break;
+        const int n = quint8(d[1]);
+        ui->tblSpeedCal->setRowCount(0);
+        for (int i = 0; i < n && (2 + i*8 + 8) <= payload.size(); ++i) {
+            float r, k;
+            std::memcpy(&r, d + 2 + i*8,     4);
+            std::memcpy(&k, d + 2 + i*8 + 4, 4);
+            ui->tblSpeedCal->insertRow(i);
+            // с устройства: r = СЫРАЯ об/мин (ключ), k = текущий коэфф.
+            // Измерено = сырое×k; задано = сырое×k (Δ=0, «новый»=k — согласованно).
+            speedCalSetRow(i, double(r) * double(k), double(r) * double(k), double(k));
+        }
+        break;
+    }
+    case LtpCmd::PASSPORT_GET: {
+        // 0x35: [0]=err, [1]=valid, [2..17]=serial(16), [18]=variant,
+        // [19..20]=year u16(LE), [21]=month, [22]=day.
+        if (payload.size() < 23 || d[0] != 0) break;
+        const bool valid = (d[1] != 0);
+        if (!valid) {
+            appendLog(QStringLiteral("[RX] Паспорт не задан (стр.123)"));
+            ui->editSerial->setText(QString());
+            ui->editProdDate->setText(QString());
+            break;
+        }
+        char ser[17];
+        std::memcpy(ser, d + 2, 16);
+        ser[16] = '\0';                                     // серийник — C-строка до '\0'
+        ui->editSerial->setText(QString::fromLatin1(ser));
+        ui->cmbDevVariant->setCurrentIndex(quint8(d[18]) == 0x0B ? 1 : 0);
+        quint16 y; std::memcpy(&y, d + 19, 2);
+        const int mo = quint8(d[21]), da = quint8(d[22]);
+        const QDate date(y, mo, da);
+        ui->editProdDate->setText((y == 0) ? QString()            // записан без даты
+            : date.isValid() ? date.toString(QStringLiteral("yyyy-MM-dd"))
+            : QStringLiteral("%1-%2-%3").arg(y,4,10,QLatin1Char('0'))
+                  .arg(mo,2,10,QLatin1Char('0')).arg(da,2,10,QLatin1Char('0')));
+        appendLog(QStringLiteral("[RX] Паспорт: %1").arg(ui->editSerial->text()));
+        break;
+    }
+    case LtpCmd::PASSPORT_SET:
+        appendLog(d && d[0]==0
+            ? QStringLiteral("[RX] Паспорт записан (стр.123)")
+            : QStringLiteral("[RX] Паспорт: ошибка записи"));
+        break;
+    case LtpCmd::ACT_HISTORY: {
+        // 0x2E: [0]=err, [1..2]=count u16 событий, далее count×[type u8 | ts u32].
+        // type 0xF3=начало жизни, 0xF4=конец. Разбиваем на строки «начало → конец»
+        // (03.08.2026). «Активаций» = число начал. Панель истории на «FLASH STM».
+        if (payload.size() < 3 || d[0] != 0) break;
+        quint16 cnt; std::memcpy(&cnt, d + 1, 2);   // число событий; событие = 7 байт
+        QStringList lines;
+        int lives = 0;
+        QString openStart;      // начало текущей ещё не закрытой жизни
+        auto fmt = [](quint32 ts) {
+            return QDateTime::fromSecsSinceEpoch(qint64(ts))
+                       .toString(QStringLiteral("yy.MM.dd HH:mm")); };
+        for (int i = 0; i < int(cnt) && (3 + i*7 + 7) <= payload.size(); ++i) {
+            const quint8 type = quint8(d[3 + i*7]);
+            quint32 ts;  std::memcpy(&ts,  d + 3 + i*7 + 1, 4);
+            quint16 rst; std::memcpy(&rst, d + 3 + i*7 + 5, 2);   // [6]=таймер [7]=питание
+            // Моноширинный вывод (Consolas): столбцы фиксированной ширины —
+            // цифры под цифрами. Метка «таймер»/«питание» дополнена до 7 знаков,
+            // счётчик выровнен по правому краю (ширина 3).
+            if (type == 0xF3u) {                     // начало
+                if (!openStart.isEmpty())            // прошлая осталась открытой
+                    lines << QStringLiteral("%1. %2   (идёт)").arg(lives, 2).arg(openStart);
+                ++lives;
+                openStart = fmt(ts);
+            } else if (type == 0xF4u) {              // конец → запись в 2 строки:
+                const int rt = rst & 0xFFu, rp = (rst >> 8) & 0xFFu;   // таймер, питание
+                //  строка 1: N.  <старт>       таймер <кол-во>
+                //  строка 2:     <окончание>   питание <кол-во>
+                lines << QStringLiteral("%1. %2   %3 %4").arg(lives, 2)
+                             .arg(openStart.isEmpty() ? QStringLiteral("?") : openStart)
+                             .arg(QStringLiteral("таймер").leftJustified(7)).arg(rt, 3);
+                lines << QStringLiteral("    %1   %2 %3").arg(fmt(ts))
+                             .arg(QStringLiteral("питание").leftJustified(7)).arg(rp, 3);
+                openStart.clear();
+            }
+        }
+        if (!openStart.isEmpty())                    // последняя жизнь ещё идёт
+            lines << QStringLiteral("%1. %2   (идёт)").arg(lives, 2).arg(openStart);
+        ui->lblActCount->setText(QString::number(lives));
+        ui->actHistory->setPlainText(lives == 0
+            ? QStringLiteral("Активаций нет (устройство не активировано).")
+            : lines.join(QLatin1Char('\n')));
+        break;
+    }
+    case LtpCmd::FLASH_SPEED_TEST: {
+        // Ответ 0x2D — 5 байт: [0]=err, [1..4]=страниц/с (uint32 LE).
+        // Двухфазный замер: фаза 1 = запись ЭТАЛОНА (prep, безопасная частота),
+        // фаза 2 = ЧТЕНИЕ по готовому эталону на выбранной частоте + сверка.
+        if (payload.size() < 5) break;
+        const bool    err  = quint8(payload.at(0)) != 0;
+        const quint32 pps  = quint32(quint8(payload.at(1)))
+                           | (quint32(quint8(payload.at(2))) << 8)
+                           | (quint32(quint8(payload.at(3))) << 16)
+                           | (quint32(quint8(payload.at(4))) << 24);
+        const double  kbps = double(pps) * 256.0 / 1024.0;   // страниц/с × 256 / 1024
+
+        if (m_speedPhase == 1) {
+            // ── Ответ на запись ЭТАЛОНА ──
+            if (err) {   // эталон не записался/не сверился — дальше идти нельзя
+                ui->lblMemSpeed->setText(QStringLiteral("эталон: ошибка"));
+                appendLog(QStringLiteral("[Скорость] эталон НЕ записался — стоп (проверь флеш/область)"));
+                m_speedPhase = 0;
+                m_dev->setTimeout(ui->spinTimeout->value());
+                break;
+            }
+            m_speedRefReady = true;
+            m_speedRefStart = ui->spinMemStartPage->value();
+            m_speedRefPages = ui->spinMemPages->value();
+            appendLog(QStringLiteral("[Скорость] эталон записан и сверен → читаю на выбранной конфигурации"));
+            m_speedPhase = 2;
+            const quint8 spiIdx  = quint8(qMax(0, ui->comboSpiMode->currentIndex()));
+            const quint8 freqIdx = quint8(qMax(0, ui->comboSpiMhz->currentIndex()));
+            requestCmd(LtpCmd::FLASH_SET_SPI_MODE, QByteArray(1, char(spiIdx)),  TagManual);
+            requestCmd(LtpCmd::FLASH_SET_FREQ,     QByteArray(1, char(freqIdx)), TagManual);
+            showMemSpeed(1);
+            break;
+        }
+
+        // ── Ответ на ЧТЕНИЕ (фаза 2) ──
+        if (err) {   // прочитанное не сошлось с эталоном → частота/режим ненадёжны
+            ui->lblMemSpeed->setText(QStringLiteral("ошибка (данные)"));
+            appendLog(QStringLiteral("[Скорость] чтение не сошлось с эталоном — эта частота/режим для чтения ненадёжны"));
+        } else {
+            ui->lblMemSpeed->setText(QStringLiteral("%1 КБайт/с").arg(kbps, 0, 'f', 0));
+            appendLog(QStringLiteral("[Скорость] чтение %1 КБ/с (данные сверены с эталоном)").arg(kbps, 0, 'f', 0));
+        }
+        m_speedPhase = 0;
+        m_dev->setTimeout(ui->spinTimeout->value());
+        break;
+    }
     case LtpCmd::FLASH_WRITE:
         if (tag == TagImg) {
             ++m_imgPagesDone;
@@ -1673,22 +2579,34 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 if (m_imgPagesDone < m_imgPagesTotal) {
                     if (btn) btn->setText(
                         QStringLiteral("%1 %2/%3 ■").arg(pfx).arg(m_imgPagesDone).arg(m_imgPagesTotal));
-                    // Живая индикация в верхних ячейках «Факт» (02.07.2026):
-                    // «страниц» — записано на данный момент, «начало» —
-                    // подтверждается с первой реально записанной страницы.
-                    ui->lblImgPages->setText(QString::number(m_imgPagesDone));
-                    ui->lblImgAddr->setText(QString::number(m_imgStartPage));
+                    // «Адрес»/Факт — живой текущий адрес записи.
+                    ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(m_imgStartPage + m_imgPagesDone - 1) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
+                    // «Старт»/«Страниц» (Проверка, Факт) — тот же живой ход,
+                    // теперь и для образа (22.07.2026, по просьбе).
+                    ui->lblCurActivePage->setText(QString::number(m_imgStartPage + m_imgPagesDone));
+                    ui->lblCurPages->setText(QString::number(m_imgPagesDone));
+                    // «Занято» — живое обновление по факту записи (22.07.2026,
+                    // тот же приём, что у термотеста), без ожидания отдельного
+                    // пересканирования Flash.
+                    if (m_firstFreePage >= 0
+                        && int(m_imgStartPage) + m_imgPagesDone > m_firstFreePage) {
+                        m_firstFreePage = int(m_imgStartPage) + m_imgPagesDone;
+                        updateOccupiedLabel();
+                    }
                 } else {
                     if (btn) btn->setText(m_imgBtnLabel);
                     m_imgActiveBtn = nullptr;
                     setOpsEnabled(true);
                     ui->btnMemReadImg->setEnabled(true);
-                    // «Страниц»/«Страница» (верхние, факт) — расположение
-                    // реально записанного образа (запрос пользователя
-                    // 20.06.2026). Отдельно от «Задать» ниже — «Прочитать»
-                    // берёт диапазон именно отсюда, а не из тестовых полей.
-                    ui->lblImgPages->setText(QString::number(m_imgPagesTotal));
-                    ui->lblImgAddr->setText(QString::number(m_imgStartPage));
+                    // «Адрес»/Факт — итоговый адрес последней записанной страницы.
+                    ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(m_imgStartPage + m_imgPagesTotal - 1) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
+                    ui->lblCurActivePage->setText(QString::number(m_imgStartPage + m_imgPagesTotal));
+                    ui->lblCurPages->setText(QString::number(m_imgPagesTotal));
+                    // «Занято» — настоящий пересчёт по завершении (22.07.2026).
+                    // «Старт» подтянем к новой первой свободной, когда пересчёт
+                    // реально придёт (см. flashBinSearchSendNext).
+                    m_syncStartAfterImage = true;
+                    flashBinSearchStart();
                     const bool isRg = (btn == ui->btnImgRG);
                     // Явное сообщение о завершении (раньше после записи в
                     // журнале не было видно никакого результата — было неясно,
@@ -1701,6 +2619,12 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     m_flashImageState = isRg ? FlashImageState::Registrator
                                               : FlashImageState::Logger;
                     refreshImgButtonsHighlight();
+                    // Загружен образ = на приборе появились данные → взводим флаг
+                    // «несохранённые» (0x30=4, персистентно) и локально, чтобы
+                    // «Сохранить» покраснела. Итоговую покраску даст updateSaveSegment
+                    // по завершении сканирования памяти (flashBinSearchStart выше).
+                    m_dataFlagSet = true;
+                    requestCmd(LtpCmd::DATA_FLAG, QByteArray(1, char(4)), TagManual);
                     // Имитация отработавшего устройства — заодно синхронизируем
                     // часы устройства текущим временем ПК, как при реальной
                     // активации (ActStep::SyncTime), иначе RTC будет хранить
@@ -1781,6 +2705,26 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             if (d && d[0] != 0) ++m_test.errTotal;
             ++m_test.pagesDone;
             m_test.pageCur = m_test.pagesDone % (m_test.pageTotal > 0 ? m_test.pageTotal : 1);
+            // «Занято» — живое обновление по факту записи (22.07.2026, тот же
+            // приём, что у образа/термотеста), если реально писали (не ошибка).
+            if (d && d[0] == 0 && m_firstFreePage >= 0) {
+                // Позиция ВНУТРИ текущего цикла, а не сквозной pagesDone: при
+                // нескольких циклах повторная запись в те же страницы не должна
+                // раздувать «Занято» (26.07.2026). pagesDone уже инкрементирован
+                // выше, поэтому только что записанная страница в цикле —
+                // (pagesDone-1) % pageTotal, первая свободная за ней = +1.
+                const int inCycle = (m_test.pagesDone - 1)
+                                    % (m_test.pageTotal > 0 ? m_test.pageTotal : 1);
+                const int curPage = int(m_test.pageStart) + inCycle + 1;
+                if (curPage > m_firstFreePage) {
+                    m_firstFreePage = curPage;
+                    updateOccupiedLabel();
+                }
+                // «Адрес» — живой адрес текущей операции записи (26.07.2026,
+                // по ходу, как и «Байт»/Факт), не только по завершении серии.
+                const int wrPage = int(m_test.pageStart) + inCycle;
+                ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(wrPage) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
+            }
             memTestUpdateUi();
             if (m_test.pagesDone >= m_test.pageTotal * m_test.cycleTotal) {
                 m_test.running = false;
@@ -1791,7 +2735,17 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 // После записи — сразу показать результат в гекс-панели без
                 // нажатия «Прочитать» (17.07.2026). Диапазон — «Старт»/«Страниц»
                 // (с ограничением авто-дампа kAutoDumpMaxPages).
+                // memTestDump() переиспользует m_test.* под СВОЙ проход — сохраняем
+                // реальный результат теста, восстановим по факту завершения дампа
+                // (22.07.2026, по факту: панель показывала «Страниц 64» от дампа
+                // вместо настоящих 100/100 от теста).
+                m_savedTestForDump = m_test;
+                m_restoreTestAfterDump = true;
                 memTestDump();
+                // «Занято» — настоящий пересчёт по завершении операции
+                // (22.07.2026), не только «угадывание» вперёд по ходу —
+                // так учитываются и стирания, и любые другие изменения.
+                flashBinSearchStart();
             }
             if (d && d[0] == 0)
                 ui->memReport->appendPlainText(QStringLiteral("Запись OK"));
@@ -1805,10 +2759,68 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             m_arc.running = false;
             break;
         }
+        if (tag == TagWriteVerify && (payload.size() < 2 || d[0] != 0)) {
+            m_dev->clearQueue();
+            m_test.running = false;
+            m_test.step    = TestStep::Idle;
+            ui->btnMemWrite->setText(QStringLiteral("Запись"));
+            setOpsEnabled(true);
+            memTestUpdateUi();
+            appendLog(QStringLiteral(
+                "[Запись] контрольное чтение стр.%1 не удалось — останов")
+                    .arg(m_test.pageStart + m_test.pagesDone));
+            break;
+        }
         if (payload.size() >= 2 && d[0] == 0) {
             const QByteArray data = payload.mid(1);
             if (tag == TagArchive) {
                 archiveHandleChunk(data, m_arc.chunkRequested);
+            } else if (tag == TagWriteVerify) {
+                // Контрольное чтение сразу после записи страницы (22.07.2026).
+                // Тот же байт ожидания, что и при записи (editTestByte) — но
+                // ЗАФИКСИРОВАННЫЙ на момент старта «Запись», а не читаемый
+                // заново (правка поля в процессе не должна сбивать сверку, тот
+                // же принцип, что у m_tempRun.testByte).
+                // «Байт»/Факт — реально прочитанный при контрольном чтении
+                // байт (26.07.2026: раньше верификация читала, но в поле не
+                // клала → после «Запись» «Байт»/Факт оставался пустым).
+                if (!data.isEmpty()) m_test.lastReadByte = quint8(data.at(0));
+                bool okB = false;
+                const int exp = ui->editTestByte->text().trimmed().toInt(&okB, 16);
+                int mism = 0;
+                if (okB) for (char c : data) if (quint8(c) != quint8(exp)) ++mism;
+                if (mism > 0) m_test.errTotal += mism;
+                // Порог остановки — spinMaxErrors («Ошибок», Задать). 0 (пусто,
+                // спец.значение) = не останавливаться, просто считать все
+                // ошибки до конца (как раньше). N>0 = остановиться, как только
+                // накопленный errTotal достигнет N (по просьбе 22.07.2026).
+                const int maxErrors = ui->spinMaxErrors->value();
+                if (mism > 0 && maxErrors >= 0 && m_test.errTotal >= maxErrors) {
+                    memTestUpdateUi();
+                    m_dev->clearQueue();   // дальше страницы уже не запишутся
+                    m_test.running = false;
+                    m_test.step    = TestStep::Idle;
+                    ui->btnMemWrite->setText(QStringLiteral("Запись"));
+                    setOpsEnabled(true);
+                    memTestUpdateUi();
+                    appendLog(QStringLiteral(
+                        "[Запись] стр.%1: контрольное чтение — расхождений %2/256, "
+                        "порог ошибок (%3) достигнут — останов (записано %4 из %5 стр.)")
+                            .arg(m_test.pageStart + m_test.pagesDone)
+                            .arg(mism).arg(maxErrors).arg(m_test.pagesDone)
+                            .arg(m_test.pageTotal * m_test.cycleTotal));
+                } else if (mism > 0) {
+                    memTestUpdateUi();
+                    appendLog(QStringLiteral(
+                        "[Запись] стр.%1: контрольное чтение — расхождений %2/256 "
+                        "(всего %3%4), продолжаю")
+                            .arg(m_test.pageStart + m_test.pagesDone)
+                            .arg(mism).arg(m_test.errTotal)
+                            .arg(maxErrors >= 0 ? QStringLiteral("/%1").arg(maxErrors) : QString()));
+                }
+                // Совпало — ничего дополнительно не делаем, прогресс уже
+                // считает обработчик FLASH_WRITE (TagManual) для той же
+                // страницы; здесь только проверка и возможный останов.
             } else if (tag == TagProbe) {
                 // Определяем, что лежит в Flash, по первому байту стр.1.
                 const quint8 b0 = data.isEmpty() ? 0xFF : quint8(data.at(0));
@@ -1822,13 +2834,8 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 const quint16 pg = quint16(m_test.pageStart + m_test.pageCur);
 
                 // «Байт» Факт — реально прочитанный байт (см. MemTestState)
-                if (!data.isEmpty()) {
-                    m_test.lastReadByte    = quint8(data.at(0));
-                    m_test.lastReadUniform = true;
-                    for (char c : data)
-                        if (quint8(c) != quint8(m_test.lastReadByte))
-                            { m_test.lastReadUniform = false; break; }
-                }
+                if (!data.isEmpty())
+                    m_test.lastReadByte = quint8(data.at(0));
 
                 if (m_test.step == TestStep::Dump) {
                     // «Прочитать» — просто накапливаем сырые байты, без сравнения
@@ -1852,15 +2859,20 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
 
                 ++m_test.pagesDone;
                 m_test.pageCur = m_test.pagesDone;
-                memTestUpdateUi();
+                // Во время ВИДИМОГО дампа после «Запись»/«Чтение»
+                // (m_restoreTestAfterDump) панель «Проверка» держит замороженный
+                // результат теста — не показываем ход самого дампа, иначе Факт
+                // проскакивает «ещё один цикл» после «готово» (26.07.2026).
+                if (!(m_test.step == TestStep::Dump && m_restoreTestAfterDump))
+                    memTestUpdateUi();
                 if (m_test.pagesDone >= m_test.pageTotal) {
                     // завершено
                     if (m_test.step == TestStep::Dump) {
                         renderHexDump(m_test.pageStart, m_dumpBuf);
                         ui->memReport->appendPlainText(QStringLiteral(
                             "Дамп готов: стр.%1..%2 (%3 байт)")
-                            .arg(m_test.pageStart)
-                            .arg(m_test.pageStart + m_test.pageTotal - 1)
+                            .arg(m_test.pageStart + 1)
+                            .arg(m_test.pageStart + m_test.pageTotal)
                             .arg(m_dumpBuf.size()));
                     } else {
                         const qint64 totalBytes = qint64(m_test.pageTotal) * 256;
@@ -1871,6 +2883,24 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     m_test.running = false;
                     m_test.step    = TestStep::Idle;
                     setOpsEnabled(true);
+                    if (m_silentDump) {
+                        // «Тихий» автодамп реально завершился ТОЛЬКО СЕЙЧАС
+                        // (ответ асинхронный — раньше тут стояло немедленное
+                        // восстановление m_test сразу после вызова, что ломало
+                        // сам ход дампа и роняло программу при заходе на
+                        // вкладку). Панель «Проверка» — просто пусто, а не
+                        // цифры дампа (не относящегося к пользовательскому тесту).
+                        m_silentDump = false;
+                        m_test.pageTotal = 0;
+                    } else if (m_restoreTestAfterDump) {
+                        // Видимый дамп после «Запись»/«Чтение» реально завершился
+                        // ТОЛЬКО СЕЙЧАС — восстанавливаем настоящий результат
+                        // теста (не блэнкаем, в отличие от «тихого» случая выше),
+                        // 22.07.2026, по факту описанного бага (см. комментарий
+                        // у места вызова memTestDump).
+                        m_restoreTestAfterDump = false;
+                        m_test = m_savedTestForDump;
+                    }
                     memTestUpdateUi();
                     return;
                 }
@@ -1880,13 +2910,8 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             } else if (tag == TagTempRun) {
                 // верификация страницы температурного прогона
                 if (m_tempRun.step == TempRunStep::Read) {
-                    if (!data.isEmpty()) {   // «Байт» Факт (см. MemTestState)
-                        m_test.lastReadByte    = quint8(data.at(0));
-                        m_test.lastReadUniform = true;
-                        for (char c : data)
-                            if (quint8(c) != quint8(m_test.lastReadByte))
-                                { m_test.lastReadUniform = false; break; }
-                    }
+                    if (!data.isEmpty())   // «Байт» Факт (см. MemTestState)
+                        m_test.lastReadByte = quint8(data.at(0));
                     int mism = 0;
                     for (char c : data) if (quint8(c) != m_tempRun.testByte) ++mism;
                     ++m_tempRun.opCount;
@@ -1909,6 +2934,14 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     renderHexDump(m_tempRun.rangeStart, m_dumpBuf);
                     m_test.pagesDone = m_tempRun.opCount;
                     m_test.errTotal  = m_tempRun.errCount;
+                    // «Занято» — живое обновление по факту записи (22.07.2026),
+                    // без полного скана: термотест только что записал
+                    // m_tempRun.page — если это дальше текущей известной
+                    // границы, граница и «Занято» сдвигаются сразу.
+                    if (m_firstFreePage >= 0 && int(m_tempRun.page) + 1 > m_firstFreePage) {
+                        m_firstFreePage = int(m_tempRun.page) + 1;
+                        updateOccupiedLabel();
+                    }
                     // Блок текущей температурной точки: осталось ли страниц из
                     // «проходов»? Да — сразу пишем/сверяем следующую страницу;
                     // нет — блок завершён, ждём следующего шага °C (17.07.2026).
@@ -1916,24 +2949,24 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                         ++m_tempRun.page;                     // следующая страница блока
                         m_tempRun.step   = TempRunStep::Idle; // разрешить tempRunDoOp
                         m_test.pageStart = m_tempRun.page;
+                        ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(m_tempRun.page) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
                         memTestUpdateUi();
                         tempRunDoOp();
                     } else {
                         m_tempRun.step   = TempRunStep::Idle;
                         m_test.step      = TestStep::Idle;
                         m_test.pageStart = m_tempRun.page;
+                        ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(m_tempRun.page) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
                         memTestUpdateUi();
+                        // «Занято» — настоящий пересчёт по завершении блока
+                        // страниц (22.07.2026), не только «угадывание».
+                        flashBinSearchStart();
                     }
                 }
             } else {
                 // ручной запрос (btnMemRead) — обновляем прогресс
-                if (!data.isEmpty()) {   // «Байт» Факт (см. MemTestState)
-                    m_test.lastReadByte    = quint8(data.at(0));
-                    m_test.lastReadUniform = true;
-                    for (char c : data)
-                        if (quint8(c) != quint8(m_test.lastReadByte))
-                            { m_test.lastReadUniform = false; break; }
-                }
+                if (!data.isEmpty())   // «Байт» Факт (см. MemTestState)
+                    m_test.lastReadByte = quint8(data.at(0));
                 bool ok = false;
                 const int exp = ui->editTestByte->text().trimmed().toInt(&ok, 16);
                 int mism = 0;
@@ -1942,14 +2975,33 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 ++m_test.pagesDone;
                 m_test.pageCur = m_test.pagesDone % (m_test.pageTotal > 0 ? m_test.pageTotal : 1);
                 memTestUpdateUi();
-                if (m_test.pagesDone >= m_test.pageTotal * m_test.cycleTotal) {
+                // Порог остановки — тот же spinMaxErrors, что и у «Запись»
+                // (22.07.2026, по просьбе: одно поле, должно работать
+                // одинаково для обеих кнопок). 0 (пусто) — не останавливаться.
+                const int maxErrors = ui->spinMaxErrors->value();
+                const bool thresholdHit = (mism > 0 && maxErrors >= 0 && m_test.errTotal >= maxErrors);
+                if (thresholdHit) m_dev->clearQueue();   // дальше страницы уже не читаем
+                if (thresholdHit || m_test.pagesDone >= m_test.pageTotal * m_test.cycleTotal) {
                     m_test.running = false;
                     m_test.step    = TestStep::Idle;
                     ui->btnMemRead->setText(QStringLiteral("Чтение"));
                     setOpsEnabled(true);
                     memTestUpdateUi();
+                    if (thresholdHit)
+                        appendLog(QStringLiteral(
+                            "[Чтение] порог ошибок (%1) достигнут — останов (прочитано %2 из %3 стр.)")
+                                .arg(maxErrors).arg(m_test.pagesDone)
+                                .arg(m_test.pageTotal * m_test.cycleTotal));
                     // После чтения — обновить гекс-панель актуальным содержимым
                     // (17.07.2026, по запросу), без нажатия «Прочитать».
+                    // memTestDump() переиспользует m_test.* для СВОЕГО прогона
+                    // (ограничен kAutoDumpMaxPages) — сохраняем реальный итог
+                    // теста, восстановим по факту завершения дампа (22.07.2026,
+                    // по факту: панель показывала «Страниц 64» от дампа вместо
+                    // настоящего результата чтения, «Ошибок» — зелёный OK
+                    // вместо реальных расхождений).
+                    m_savedTestForDump = m_test;
+                    m_restoreTestAfterDump = true;
                     memTestDump();
                 }
                 ui->memReport->appendPlainText(QStringLiteral("Чтение %1 байт: %2")
@@ -1982,6 +3034,38 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         std::memcpy(&uptime,    d + 1,  4);
         std::memcpy(&ts_first,  d + 5,  4);
         std::memcpy(&ts_last,   d + 9,  4);
+        // ts_activation (d+13): unix-сек последней активации или 0xFFFFFFFF —
+        // показываем в тултипе шкалы активации (27.07.2026).
+        {   quint32 tsAct; std::memcpy(&tsAct, d + 13, 4);
+            m_tsActivation = tsAct;   // ts из ЖУРНАЛА (t0 калибровки, подпись). НЕ состояние!
+            // 03.08.2026: «активирован» = NOR-ФЛАГ [0] (m_deviceActivated из маски
+            // 0x30), а НЕ журнал. Флаг и журнал НЕ связаны: «Очистить журналы»
+            // стирает записи (ts пропадёт), но флаг остаётся → прибор активирован.
+            const bool hasTs = (tsAct != 0xFFFFFFFFu);
+            const QString tsTxt = hasTs
+                ? QDateTime::fromSecsSinceEpoch(qint64(tsAct)).toString(QStringLiteral("yy.MM.dd HH:mm"))
+                : QString();
+            // Карточка «Активация» — три состояния по флагам [0]/[2] (03.08.2026):
+            //   [0] чист            → не активирован
+            //   [0] есть, [2] чист   → активирован (+ дата)
+            //   [0] есть, [2] есть   → деактивирован (сохранение выполнено)
+            QString actTxt;
+            if (!m_deviceActivated)     actTxt = QStringLiteral("не активирован");
+            else if (!m_dataSaved)      actTxt = hasTs
+                    ? QStringLiteral("активирован\n%1").arg(tsTxt)
+                    : QStringLiteral("активирован");
+            else                        actTxt = QStringLiteral("деактивирован");
+            ui->lblActDate->setText(actTxt);
+            updateActivationState();
+            ui->lblActTs->setText((m_deviceActivated && hasTs) ? tsTxt : QStringLiteral(" "));
+            ui->barActivation->setToolTip(m_deviceActivated
+                ? (hasTs ? QStringLiteral("Активировано: %1").arg(tsTxt)
+                         : QStringLiteral("Активировано"))
+                : QStringLiteral("Не активировано"));
+            if (m_act.step == ActStep::Idle)
+                ui->barActivation->setSectorState(6, m_deviceActivated
+                    ? ActivationBar::SectorState::Done
+                    : ActivationBar::SectorState::Disabled); }
 
         // Захватить lifetime-наработку устройства (base для «Общая»/«Сессия»
         // в панели «Наработка»).
@@ -2006,13 +3090,28 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             const bool synced = (rst_timer == 0 && rst_power == 0);
             const auto target = synced ? ActivationBar::SectorState::Active
                                         : ActivationBar::SectorState::Idle;
+            // «Сброс WDT» — сегмент 1. Одиночный клик (m_actWdtPending) резолвим
+            // в ЛЮБОМ режиме (02.08.2026 — лента видна и в операторе, клик там
+            // тоже работает). Живой фоновый индикатор (без клика) красим только
+            // в «Сервис» и только вне волны активации.
             if (m_actWdtPending) {
                 m_actWdtPending = false;
-                activationSetSectorMinDelay(1, target, m_actWdtActiveMs);
-            } else if (m_act.step == ActStep::Idle) {
-                // Вне полной автоактивации (21.07.2026) — там сегмент 1
-                // означает ДРУГОЙ шаг («проверка устройства»), не трогаем.
-                activationSetSector(1, target);
+                activationSetSectorMinDelay(1, target, m_actWdtActiveMs);   // Сброс WDT = сегмент 1
+            } else {
+                // Живой индикатор в ОБОИХ режимах, сразу по состоянию: рестарты>0 →
+                // красный (оператор тоже видит тревогу), иначе жёлтый. Не вмешиваемся
+                // только во время активной волны — её шаги ведут цвет; зелёный из волны.
+                // Клик в операторе всё равно блокирован гейтом. (02.08.2026)
+                const bool waveActive = (m_act.step != ActStep::Idle
+                                      && m_act.step != ActStep::Done
+                                      && m_act.step != ActStep::Error);
+                if (!waveActive) {
+                    if (!synced)
+                        activationSetSector(1, ActivationBar::SectorState::Idle);   // красный — рестарты (всегда)
+                    else if (m_act.step != ActStep::Done)
+                        activationSetSector(1, ActivationBar::SectorState::Active); // жёлтый — вне пост-волны
+                    // synced && Done → держим ЗЕЛЁНЫЙ от завершённой волны (03.08.2026)
+                }
             }
         }
 
@@ -2136,11 +3235,11 @@ void MainWindow::onRequestFailed(quint8 cmd)
     // переводит его в ошибку (красный), не оставляя гореть вечно (21.07.2026).
     if (m_actWdtPending && (cmd == LtpCmd::RESET_STATS || cmd == LtpCmd::GET_STATS)) {
         m_actWdtPending = false;
-        activationSetSector(1, ActivationBar::SectorState::Error);
+        activationSetSector(1, ActivationBar::SectorState::Error);   // «Сброс WDT» = сегмент 1
     }
     if (m_actSyncPending && (cmd == LtpCmd::SET_DATETIME || cmd == LtpCmd::GET_DATETIME)) {
         m_actSyncPending = false;
-        activationSetSector(2, ActivationBar::SectorState::Error);
+        activationSetSector(2, ActivationBar::SectorState::Error);   // «Синхро время» = сегмент 2
     }
 
     // Серия «⚠ Страница» (btnMemErasePage): таймаут одной страницы —
@@ -2176,6 +3275,21 @@ void MainWindow::onRequestFailed(quint8 cmd)
             QStringLiteral("⚠ Операция прервана: устройство не отвечает"));
         setOpsEnabled(true);
         memTestUpdateUi();
+    }
+    // Стирание/термотест зависли в true при таймауте (устройство не отвечает) →
+    // СБРАСЫВАЕМ, иначе гейт «Сначала остановите текущую операцию» навсегда
+    // блокирует вход в «Сервис» (03.08.2026, после зависания прибора).
+    if (m_erasing) {
+        m_dev->clearQueue();
+        m_erasing = false;
+        appendLog(QStringLiteral("⚠ Стирание прервано — устройство не отвечает"));
+        setOpsEnabled(true);
+    }
+    if (m_tempRun.running) {
+        m_dev->clearQueue();
+        m_tempRun.running = false;
+        appendLog(QStringLiteral("⚠ Термотест прерван — устройство не отвечает"));
+        setOpsEnabled(true);
     }
     if (m_imgActiveBtn) {
         auto *btn = qobject_cast<QPushButton*>(m_imgActiveBtn);
@@ -2269,18 +3383,40 @@ void MainWindow::setServiceMode(bool on)
     }
     // TODO: запрос пароля при on==true (этап 5)
 
+    m_serviceMode = on;
+    // Лента = карта активации (28.07.2026): сегменты 1..7 — индикаторы, их цвет
+    // ведут волна ▶ / GET_STATS / флаг. Здесь принудительно НЕ красим (раньше
+    // сегменты 1,2 форсились красным как «сервисные кнопки» — устарело). При
+    // выходе из «Сервис» гасим шаги волны 1..6 в серый (индикаторы неактивны вне
+    // активации); сегмент 0 «Сохранить данные» ведёт флаг, сегмент 7 VBAT — свой.
+    if (!on)
+        for (int s = 1; s <= 6; ++s)
+            ui->barActivation->setSectorState(s, ActivationBar::SectorState::Disabled);
+
     // Синхронизируем галки — взаимоисключающее выделение
     QSignalBlocker b1(ui->actGoData), b2(ui->actEngineerMode);
     ui->actGoData->setChecked(!on);
     ui->actEngineerMode->setChecked(on);
 
     ui->tabsMain->tabBar()->setVisible(on);
-    ui->chkSimulation->setVisible(on);   // только в сервисе (запрос 21.06.2026)
+    ui->chkSimulation->setVisible(false);   // перенесено в меню «Вид» (27.07.2026)
+    if (m_actSimulation) m_actSimulation->setVisible(on);   // «Симуляция» — только в сервисе
     if (!on)
         ui->tabsMain->setCurrentWidget(ui->tabDashboard);
     if (lblMode)
         lblMode->setText(on ? QStringLiteral("🔧 режим: сервис")
                             : QStringLiteral("🔒 режим: оператор"));
+
+    // Вход в сервис → сразу выполнить процедуру «Сохранить» и снять блокировку
+    // (02.08.2026, по просьбе: иначе приходится прыгать по вкладкам в поисках
+    // «Сохранить данные», а все операции упираются в гейт несохранённых данных).
+    // Только при подключении и взведённом флаге; startDataDump сам сбросит флаг
+    // по успеху (updateSaveSegment → зелёный «Сохранено»). Отмена диалога —
+    // флаг остаётся нетронутым, как и раньше (сознательный отказ сохранять).
+    if (on && m_link->isOpen() && m_dataFlagSet) {
+        appendLog(QStringLiteral("[Сервис] есть несохранённые данные — политика сохранения…"));
+        dataSaveFlow();   // §3.2: активирован→в файл; не активирован→спросить
+    }
 }
 
 void MainWindow::tickPcClock()
@@ -2327,6 +3463,21 @@ void MainWindow::setupStatusBar()
 
 void MainWindow::setupDashboardPlots()
 {
+    // Панель версии («Параметры регистратора») убрана с «Данные» (27.07.2026):
+    // версия прошивки теперь в верхней карточке (lblDevCard), в одну строку с
+    // версией приложения. Освобождаем место по вертикали (под график температуры).
+    ui->groupDevParams->hide();
+
+    // Надпись «Не активировано» убрана (27.07.2026): статус активации виден по
+    // цвету сегментов линейки (все зелёные = активировано), отдельная строка не
+    // нужна — панель активации становится ниже.
+    ui->lblActStatus->hide();
+
+    // «● Регистратор»/«● Logger» справа в шапке (lblDataFormat) убираем
+    // (27.07.2026) — подключение и так видно по индикатору и COM-порту, а место
+    // нужно под сводку. Счётчик сторожа остаётся в панели «Перезапуски».
+    ui->lblDataFormat->hide();
+
     // Мини-графики дашборда: без осей и сетки, только линия (эскиз R21)
     const auto initMini = [](QCustomPlot *plot, const QColor &color) {
         plot->xAxis->setVisible(false);
@@ -2343,6 +3494,7 @@ void MainWindow::setupDashboardPlots()
     // (удары/jerk; на варианте B — физический high-g accel) оранжевый.
     initMini(ui->plotVibro,  QColor(0xC0, 0x30, 0x30));
     initMini(ui->plotVibro2, QColor(0xE0, 0x8A, 0x20));
+    initMini(ui->plotTempArc, QColor(0x9B, 0x6F, 0xC9));   // температура — фиолетовый (27.07.2026)
     auto makeBars = [](QCustomPlot *plot, QColor c) {
         auto *b = new QCPBars(plot->xAxis, plot->yAxis);
         b->setPen(QPen(c));
@@ -2356,6 +3508,7 @@ void MainWindow::setupDashboardPlots()
     };
     m_vibBars  = makeBars(ui->plotVibro,  QColor(0xC0, 0x30, 0x30));
     m_vib2Bars = makeBars(ui->plotVibro2, QColor(0xE0, 0x8A, 0x20));
+    m_tempBars = makeBars(ui->plotTempArc, QColor(0x9B, 0x6F, 0xC9));
     // График 2 = «пики» ТОГО ЖЕ vib1 в полном масштабе (19.07.2026): удары
     // видны здесь, не сплющивая график 1 «уровень». Виден ВСЕГДА (не про
     // вариант B — это просто вторая шкала одного сигнала).
@@ -2397,12 +3550,77 @@ void MainWindow::setupDashboardPlots()
     ui->plotSpeed->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
     ui->plotSpeed->axisRect()->setRangeDrag(Qt::Horizontal);
     ui->plotSpeed->axisRect()->setRangeZoom(Qt::Horizontal);
+
+    // Короткие ВЕРТИКАЛЬНЫЕ подписи слева у каждого графика (27.07.2026): вместо
+    // горизонтальных подписей снизу — экономит вертикаль (место под 5-й график
+    // температуры). Ось Y показывает только повёрнутую подпись, без делений/линий.
+    const auto vLabel = [](QCustomPlot *plot, const QString &text, const QColor &col) -> QCPItemText* {
+        plot->axisRect()->setMargins(QMargins(14, 2, 2, 2));   // узкий отступ слева под подпись
+        plot->yAxis->setVisible(false);
+        auto *t = new QCPItemText(plot);
+        t->setClipToAxisRect(false);
+        t->setColor(col);
+        t->setText(text);
+        QFont f = t->font(); f.setPointSize(9); f.setBold(true); t->setFont(f);   // жирный — как значения
+        t->setRotation(-90);                                   // вертикально, снизу вверх
+        t->setPadding(QMargins(0, 0, 0, 0));
+        // Якорь — нижний-левый угол области данных: текст начинается от нижней
+        // линии графика и идёт вверх, тело подписи уходит в левый отступ
+        // (минимальный зазор слева).
+        t->position->setType(QCPItemPosition::ptAxisRectRatio);
+        t->position->setCoords(0.0, 1.0);
+        t->setPositionAlignment(Qt::AlignLeft | Qt::AlignBottom);
+        return t;
+    };
+    vLabel(ui->plotUptime, QStringLiteral("время"),    QColor(0x4C, 0x8B, 0xC9));
+    vLabel(ui->plotSpeed,  QStringLiteral("обороты"),  QColor(0x2F, 0x9E, 0x86));
+    vLabel(ui->plotVibro,  QStringLiteral("вибрация"), QColor(0xC0, 0x30, 0x30));
+    vLabel(ui->plotVibro2, QStringLiteral("удары"),    QColor(0xE0, 0x8A, 0x20));
+    if (auto *tL = vLabel(ui->plotTempArc, QStringLiteral("T°C"), QColor(0x9B, 0x6F, 0xC9)))
+        tL->position->setCoords(0.0, 0.88);   // нижний график — поднять от скролла
+    // Горизонтальные подписи снизу больше не нужны — скрываем (место по вертикали).
+    ui->lblUptimeCaption->hide();
+    ui->lblMaxSpeedCaption->hide();
+    ui->lblMaxVibroCaption->hide();
+    ui->lblMaxVibro2Caption->hide();
+
+    // Макс-значение — ВЕРТИКАЛЬНО в ПРАВОМ поле графика через правую ось-подпись
+    // (yAxis2, 27.07.2026): QCustomPlot сам рисует её в правом margin, столбики
+    // НЕ перекрывают (в отличие от ручного повёрнутого текста). Значение пишем в
+    // render через plot->yAxis2->setLabel(...).
+    const auto vValue = [](QCustomPlot *plot, const QColor &col) -> QCPItemText* {
+        const QMargins m = plot->axisRect()->margins();
+        plot->axisRect()->setMargins(QMargins(m.left(), m.top(), 18, m.bottom()));
+        auto *t = new QCPItemText(plot);
+        t->setClipToAxisRect(false);
+        t->setColor(col);
+        QFont f = t->font(); f.setPointSize(9); f.setBold(true); t->setFont(f);
+        t->setRotation(-90);                          // снизу вверх, как левые подписи
+        t->setPadding(QMargins(0, 0, 0, 0));
+        t->position->setType(QCPItemPosition::ptViewportRatio);
+        t->position->setCoords(1.0, 1.0);             // правый-нижний угол ВИДЖЕТА
+        t->setPositionAlignment(Qt::AlignLeft | Qt::AlignBottom);
+        return t;
+    };
+    m_valLbl[0] = vValue(ui->plotUptime,  QColor(0x4C, 0x8B, 0xC9));
+    m_valLbl[1] = vValue(ui->plotSpeed,   QColor(0x2F, 0x9E, 0x86));
+    m_valLbl[2] = vValue(ui->plotVibro,   QColor(0xD0, 0x50, 0x50));
+    m_valLbl[3] = vValue(ui->plotVibro2,  QColor(0xE0, 0x8A, 0x20));
+    m_valLbl[4] = vValue(ui->plotTempArc, QColor(0x9B, 0x6F, 0xC9));
+    // «Температура» — нижний график, у скролла тесно: поднимаем значение выше.
+    if (m_valLbl[4]) m_valLbl[4]->position->setCoords(1.0, 0.88);
+    // Прежние горизонтальные метки значений снизу больше не нужны.
+    ui->lblMaxSpeed->hide();
+    ui->lblMaxVibro->hide();
+    ui->lblMaxVibro2->hide();
+    ui->lblMaxTemp->hide();
+
     // Синхронизация осей X ВСЕХ ЧЕТЫРЁХ графиков циклов (время/гироскоп/два
     // акселерометра): зум/прокрутка любого двигает остальные (18.07.2026).
     // setRange глушит рекурсию — rangeChanged не эмитится без изменения.
     {
         const QList<QCustomPlot*> cyclePlots = {
-            ui->plotUptime, ui->plotSpeed, ui->plotVibro, ui->plotVibro2 };
+            ui->plotUptime, ui->plotSpeed, ui->plotVibro, ui->plotVibro2, ui->plotTempArc };
         for (QCustomPlot *src : cyclePlots)
             connect(src->xAxis,
                     static_cast<void (QCPAxis::*)(const QCPRange&)>(&QCPAxis::rangeChanged),
@@ -2435,6 +3653,7 @@ void MainWindow::setupDashboardPlots()
         case 1: barH = idx < m_arc.plotRpm.size()   ? m_arc.plotRpm[idx]   : 0.0; break;
         case 2: barH = idx < m_arc.plotVibroRms.size() ? m_arc.plotVibroRms[idx] : 0.0; break;  // «уровень» = RMS
         case 3: barH = idx < m_arc.plotVibro.size()    ? m_arc.plotVibro[idx]    : 0.0; break;  // «пики» = peak
+        case 4: barH = idx < m_arc.plotTemp.size()     ? m_arc.plotTemp[idx]     : 0.0; break;  // температура
         default: barH = m_arc.plotDuration[idx]; break;
         }
         const double yc = plot->yAxis->pixelToCoord(ev->pos().y());
@@ -2452,7 +3671,7 @@ void MainWindow::setupDashboardPlots()
         // RTC); всё остальное (в т.ч. даты тестовых образов) показываем как
         // есть (18.07.2026 — прежний фильтр 2020–2050 резал даты образа).
         if (dt.isValid() && dt.date().year() >= 2002)
-            l1 += QStringLiteral("   %1").arg(dt.toString(QStringLiteral("dd.MM.yy")));
+            l1 += QStringLiteral("   %1").arg(dt.toString(QStringLiteral("yy.MM.dd")));
         // Выравнивание под стр.1 (18.07.2026): «Цкл455␣␣26.10.22» — дата с 9-й
         // позиции; стр.2 «␣07:18␣␣10:53:30» — ведущий пробел + 2 пробела, старт
         // начинается той же колонкой, без разделительной точки.
@@ -2463,6 +3682,8 @@ void MainWindow::setupDashboardPlots()
         case 1:  l2 = QStringLiteral("%1о/м").arg(barH, 0, 'f', 0); break;  // «308о/м»
         case 2:
         case 3:  l2 = QStringLiteral("%1g").arg(barH / 1000.0, 0, 'f', 2); break; // «1.81g»
+        case 4:  l2 = QStringLiteral("%1°C").arg(barH, 0, 'f', 0); break;
+
         default: l2 = QStringLiteral("%1:%2:%3")
                           .arg(durS / 3600, 2, 10, QLatin1Char('0'))
                           .arg((durS / 60) % 60, 2, 10, QLatin1Char('0'))
@@ -2481,6 +3702,8 @@ void MainWindow::setupDashboardPlots()
             [this, barTip](QMouseEvent *ev) { barTip(ui->plotVibro, ev, 2); });
     connect(ui->plotVibro2, &QCustomPlot::mouseMove, this,
             [this, barTip](QMouseEvent *ev) { barTip(ui->plotVibro2, ev, 3); });
+    connect(ui->plotTempArc, &QCustomPlot::mouseMove, this,
+            [this, barTip](QMouseEvent *ev) { barTip(ui->plotTempArc, ev, 4); });
 
     // Графики мониторинга: оси и графы настраиваются на этапе 4
     for (QCustomPlot *p : { ui->plotAcc, ui->plotGyro }) {
@@ -3331,6 +4554,14 @@ void MainWindow::stendStart(bool noReg)
     // шлётся, он остаётся в Service, опросы/мониторинг живы — гейты с
     // !m_stendNoReg), мотор стартует сразу.
     m_stendKickoffPending = true;
+    // Формат записи цикла (REC_FORMAT 0x31) — ПЕРЕД стартом каждого прогона
+    // (02.08.2026). В прошивке s_recFormat живёт только в ОЗУ (персистентности
+    // нет), и сброс прибора между подключением и запуском (watchdog/питание/
+    // Standby) возвращал формат к базовому по умолчанию → первый прогон писал
+    // базу вместо уплотнённой. Досылаем формат из настроек здесь, в очереди ДО
+    // START_*, чтобы автомат писал циклы уже в нужном формате при любом прогоне.
+    requestCmd(LtpCmd::REC_FORMAT,
+               QByteArray(1, char(quint8(ui->cmbRecFormat->currentIndex()))), TagManual);
     if (m_stendNoReg) {
         // «Тест»: регистратор запускает ТОТ ЖЕ автомат, что и «Работа», но
         // БЕЗ сна — остаётся бодрым и на связи. Шлём START_TEST (0x23); мотор
@@ -3461,16 +4692,23 @@ bool MainWindow::stendLoadImageRecords(const QString &path, QString *errOut)
     QVector<OfflineCycle> out;
     for (const QByteArray &page : pages) {
         const auto *d = reinterpret_cast<const quint8 *>(page.constData());
-        for (int slot = 0; slot < kRegRecordsPerPage; ++slot) {
-            const quint8 *r = d + slot * kRecordBytes;   // v2, 48 байт
+        const quint8 mark = d[0];   // маркёр слова [0]
+        if (mark == 0xFF)           // пустое слово = конец журнала
+            { if (errOut && out.isEmpty()) *errOut = QStringLiteral("образ пуст"); goto done; }
+        // Уплотнённое (0xF3) — до 5 записей 48Б; базовое (0xF5)/подробное (0xF4) — 1.
+        for (int slot = 0, nSlots = (mark == 0xF3) ? 5 : 1; slot < nSlots; ++slot) {
+            const quint8 *r = d + 1 + slot * 48;   // запись с offset 1 + slot*48
             quint32 ts, dur, tot; float rpm;
             std::memcpy(&ts,  r + 0,  4);
             std::memcpy(&dur, r + 4,  4);
             std::memcpy(&tot, r + 8,  4);
             std::memcpy(&rpm, r + 16, 4);   // rpm_avg (отчётная «Скорость»)
             const quint16 crc = quint16(r[46]) | (quint16(r[47]) << 8);
-            if (ts == 0xFFFFFFFFu)
-                { if (errOut && out.isEmpty()) *errOut = QStringLiteral("образ пуст"); goto done; }
+            if (ts == 0xFFFFFFFFu) {
+                if (slot == 0)   // слово с маркёром, но без записи → конец
+                    { if (errOut && out.isEmpty()) *errOut = QStringLiteral("образ пуст"); goto done; }
+                break;           // конец записей уплотнённого слова
+            }
             if (crc == 0xFFFF)
                 continue;   // оборванная запись — пропускаем, как и парсер архива
             OfflineCycle rec;
@@ -3605,6 +4843,18 @@ void MainWindow::stendShowDeviceLog()
         const OfflineDevRec &r = m_offlDev[j];
         const QDateTime st = QDateTime::fromSecsSinceEpoch(qint64(r.ts));
         const QDateTime sp = st.addSecs(qint64(r.dur));
+        // ТОЧКА СТЫКА (02.08.2026): смена поколения часов между соседними
+        // записями = здесь часы обнулялись (потеря питания в поле), абсолютное
+        // время ниже отсчитывается от нуля заново и не сопоставимо с записями
+        // выше. Разделитель отличается от заголовка дня (═══), чтобы бросался
+        // в глаза. Сбрасываем curDay — после разрыва дата условная, печатаем
+        // заголовок дня заново. См. clock_epoch_seam_spec_v1.md.
+        if (j > 0 && r.epoch != m_offlDev[j - 1].epoch) {
+            text += QStringLiteral(
+                "╍╍╍ разрыв времени: часы обнулялись (поколение %1 → %2) ╍╍╍\n\n")
+                .arg(m_offlDev[j - 1].epoch).arg(r.epoch);
+            curDay = QDate();
+        }
         dayHeader(st.date());
 
         const int i = j - j0;                        // индекс пары в файле
@@ -4071,6 +5321,7 @@ void MainWindow::stendFillRegColumn(const QByteArray &payload)
         // plotTs — секунды от 2000-01-01 (база rtcToSec)
         m_arc.plotTs.append(double(QDateTime(QDate(2000,1,1), QTime(0,0))
                                        .secsTo(startReg)));
+        m_arc.plotEpoch.append(0.0);   // живой пуш — текущая эпоха, стыков нет
         m_arc.maxRpm   = qMax(m_arc.maxRpm,   float(pkRpm));
         m_arc.maxVibro = qMax(m_arc.maxVibro, float(v1p));
         m_arc.maxVib2  = qMax(m_arc.maxVib2,  float(v2p));
@@ -4160,9 +5411,13 @@ void MainWindow::stendFillRegColumn(const QByteArray &payload)
     // (device-scan при подключении/после «Стоп»), не из накопленной оценки.
     if (m_flashLiveBasePage < 0)
         m_flashLiveBasePage = m_firstFreePage;
+    // Формат записи: уплотнённый (index 1) пакует 5 записей в слово (страницу),
+    // базовый/подробный — 1 запись на слово (28.07.2026).
+    const int recsPerWord = (ui->cmbRecFormat->currentIndex() == 1) ? 5 : 1;
     if (m_flashLiveBasePage >= 0) {
-        const int est = m_flashLiveBasePage + int(m_flashLiveRecords / kRecordsPerPage);
-        m_firstFreePage = qMin(est, int(kFlashTotalPages));
+        // занятые слова = записей / записей-на-слово (округление вверх).
+        const int words = int((m_flashLiveRecords + recsPerWord - 1) / recsPerWord);
+        m_firstFreePage = qMin(m_flashLiveBasePage + words, int(kFlashTotalPages));
         flashBinSearchUpdateUi();
     }
     // Живой HEX-дамп записей в «Тест памяти» — ОДНОСТРАНИЧНЫЙ вид (12.07.2026,
@@ -4177,14 +5432,17 @@ void MainWindow::stendFillRegColumn(const QByteArray &payload)
     if (ui->txtHexDump && m_flashLiveBasePage >= 0) {
         constexpr int kMaxLiveDumpPages = 8;   // сколько последних страниц держим на экране
         const qint64 idx = m_flashLiveRecords - 1;                 // 0-based индекс записи
-        const int    off = int(idx / kRecordsPerPage) * 256        // абс. смещение от базы:
-                         + int(idx % kRecordsPerPage) * kRecordBytes; // страница×256 + слот×48
-        // Достраиваем буфер ДО ПОЛНОЙ страницы с этой записью (хвост = 0xFF) — всегда
-        // целая страница, не частичный вывод.
-        const int need = (off / 256 + 1) * 256;
+        // Слово (страница) содержит recsPerWord записей: базовый 1/слово (маркёр
+        // 0xF5), уплотнённый 5/слово (маркёр 0xF3). Запись → слот 1+slot*48.
+        const int wordIdx = int(idx / recsPerWord);   // номер слова (страницы)
+        const int slot    = int(idx % recsPerWord);   // слот внутри слова
+        const int need = wordIdx * 256 + 256;         // полная страница слова
         if (m_flashLiveBuf.size() < need)
             m_flashLiveBuf.append(QByteArray(need - m_flashLiveBuf.size(), char(0xFF)));
-        m_flashLiveBuf.replace(off, kRecordBytes, fwBuildRecord(startReg, durS, totS, maxRpm));
+        if (slot == 0)   // открытие слова — маркёр формата в [0]
+            m_flashLiveBuf[wordIdx * 256] = char(recsPerWord == 5 ? 0xF3 : 0xF5);
+        m_flashLiveBuf.replace(wordIdx * 256 + 1 + slot * 48, 48,
+                               fwBuildRecord(startReg, durS, totS, maxRpm));
         // Прокручиваемый вид (12.07.2026, по запросу): копим полные страницы,
         // показываем ПОСЛЕДНИЕ kMaxLiveDumpPages — новая (заполняемая) уходит вниз,
         // сверху виден хвост уже заполненной памяти. Буфер храним целиком (память
@@ -4638,6 +5896,26 @@ void MainWindow::setupThemeMenu()
     QAction *actDark = viewMenu->addAction(QStringLiteral("Тёмная тема"));
     actDark->setCheckable(true);
     actDark->setChecked(m_darkTheme);
+    // Обновление версии прошивки без переподключения (кнопку ↻ убрали вместе с
+    // нижней панелью версии 27.07.2026): шлём WHO_AM_I, ответ обновит заголовок.
+    viewMenu->addSeparator();
+    QAction *actRefreshFw = viewMenu->addAction(QStringLiteral("Прочитать версию прошивки"));
+    connect(actRefreshFw, &QAction::triggered, this, [this] {
+        if (!m_link->isOpen()) return;
+        requestCmd(LtpCmd::WHO_AM_I);
+        appendLog(QStringLiteral("[TX] WHO_AM_I (обновление версии ПО)"));
+    });
+    // «Симуляция» перенесена из шапки в меню (27.07.2026): пункт-галка управляет
+    // скрытым chkSimulation (он остаётся держателем состояния и логики).
+    viewMenu->addSeparator();
+    m_actSimulation = viewMenu->addAction(QStringLiteral("Симуляция"));
+    m_actSimulation->setCheckable(true);
+    m_actSimulation->setToolTip(QStringLiteral(
+        "Заполнить экран тестовыми данными без подключённого устройства"));
+    m_actSimulation->setVisible(false);   // показывается только в «Сервис» (setServiceMode)
+    connect(m_actSimulation, &QAction::toggled, this, [this](bool on) {
+        if (ui->chkSimulation->isChecked() != on) ui->chkSimulation->setChecked(on);
+    });
     // Вставляем «Вид» перед меню «Помощь», чтобы «Помощь» осталась последней.
     // Если меню «Помощь» в .ui называется иначе — поправь menuHelp на своё имя.
     menuBar()->insertMenu(ui->menuHelp->menuAction(), viewMenu);
@@ -4702,7 +5980,7 @@ void MainWindow::applyStyles(const ThemePalette &t)
         "  border-bottom: 2px solid %9; }"
         "QTabBar::tab:hover { color: %8; }"
         "QPushButton { background: %2; border: 1px solid %4;"
-        "  border-radius: 6px; padding: 4px 12px; color: %5; }"
+        "  border-radius: 2px; padding: 4px 12px; color: %5; }"
         "QPushButton:hover { background: %7; }"
         "QPushButton:pressed { background: %7; }"
         "QPushButton:checked { background: %7; border-color: %9; }"
@@ -4761,17 +6039,15 @@ void MainWindow::applyStyles(const ThemePalette &t)
         "QLabel#lblActStatus { color: #C9A227; font-weight: 600; font-size: 11px; }"
         "QStatusBar { background: %1; color: %6; }"
         "QStatusBar QLabel { color: %6; }"
-        "QPushButton#btnMemWrite, QPushButton#btnMemRead {"
-        "  background: %7; border: 1px solid %9; color: %5; font-weight: 600; }"
         "QPushButton#btnMemErasePage, QPushButton#btnMemEraseSector,"
         "QPushButton#btnMemEraseChip {"
         "  background: #7A3C00; border: 1px solid #B85C00; color: #FFE4B5; font-weight: 600; }"
         "QFrame#frameMemInfo { background: %2; border: 1px solid %3;"
         "  border-radius: 8px; min-width: 80px; }"
         "QLabel#lblCurByte, QLabel#lblCurPages, QLabel#lblCurActivePage,"
-        "QLabel#lblCurSpi, QLabel#lblCurCycle, QLabel#lblCurErrors,"
-        "QLabel#lblCurStep, QLabel#lblImgPages, QLabel#lblImgAddr,"
-        "QLabel#lblImgPagesNA, QLabel#lblImgAddrNA {"
+        "QLabel#lblCurCycle, QLabel#lblCurErrors,"
+        "QLabel#lblImgPages, QLabel#lblImgAddr,"
+        "QLabel#lblImgPagesNA {"
         "  border: 1px solid %3; border-radius: 6px;"
         "  background: %10; padding: 2px 8px;"
         "  min-width: 50px; max-width: 90px; }"
@@ -4784,8 +6060,6 @@ void MainWindow::applyStyles(const ThemePalette &t)
         /* Период/Окно — подпись+список в общей рамке-блоке */
         "QFrame#frameMonPeriod, QFrame#frameMonWindow {"
         "  border: 1px solid %3; border-radius: 6px; }"
-        "QGroupBox#groupMemParams QSpinBox::up-button,"
-        "QGroupBox#groupMemParams QSpinBox::down-button { width: 0; border: none; }"
         "QToolTip { color: %5; background: %2; border: 1px solid %3; }"
         )
         .arg(t.bg)          // %1
@@ -5024,11 +6298,11 @@ void MainWindow::refreshImgButtonsHighlight()
 // понять, что сейчас лежит в Flash, и подсветить соответствующую кнопку
 // «Образ RG/LOG» (не дожидаясь новой записи в этой же сессии). Эвристика:
 // байт [0] страницы — 0xFF, если она вообще не записана (конец журнала);
-// иначе для Logger v2 это всегда один из типов фрейма 0xF6..0xFE (см.
-// data_format_spec_v1.md), для Регистратора v2 — младший байт unix-времени
-// начала цикла, который физически не может совпасть с этим диапазоном для
-// дат из разумного будущего/прошлого (риск ложной классификации — единицы
-// процентов, это вспомогательная подсказка в UI, а не критичная проверка).
+// Классификация по первому байту слова: 0xFF пусто; Logger — тип фрейма
+// 0xF6..0xFE; Регистратор — маркёр 0xF5 (базовая) / 0xF4 (расширенная),
+// оба НИЖЕ логгеровского диапазона (формат «1 цикл = 1 слово», 28.07.2026).
+// Раньше у Регистратора здесь был случайный младший байт времени (риск
+// ложной классификации ~единицы %); теперь маркёр фиксирован — детект точен.
 void MainWindow::probeFlashImageState()
 {
     if (!m_link->isOpen() || m_arc.running || m_test.running
@@ -5063,9 +6337,64 @@ void MainWindow::flashBinSearchStart()
     m_binSearchFailed = false;
     m_binSearch = {};
     m_binSearch.running = true;
-    m_binSearch.lo = int(kLogStartPage);      // 1
+    m_binSearch.lo = 0;                       // от внутренней стр.0 (занято = непустые с начала)
     m_binSearch.hi = int(kFlashTotalPages);   // 65536 — sentinel «чип полностью занят»
     flashBinSearchSendNext();
+}
+
+// «Занято» (22.07.2026, по обсуждению — работаем страницами, это и есть
+// естественная единица Flash: минимальный блок программирования 256 байт;
+// «слово» — не отсюда термин, чтобы не путать с де-факто 2 байтами).
+// Задать — сколько страниц занято (красный), Факт — сколько ещё свободно
+// (зелёный). Источник — m_firstFreePage (живой, поддерживается
+// flashBinSearchStart и прямыми обновлениями после стирания/операций).
+// Реальная скорость последней операции записи/чтения (26.07.2026):
+// объём (страниц×циклов×256) делим на затраченное время, выводим КБ/с.
+// Замер скорости флеша (26.07.2026, вариант Б): по завершении «Запись»/
+// «Чтение» забираем у устройства накопленное время операций с чипом (0x2D=1)
+// — оно копилось по ходу постраничного обмена, ждать ничего не нужно.
+// mode здесь только для объёма в разборе ответа. Групповые не вызывают.
+// Замер скорости флеша по кнопке «Скорость» (26.07.2026, финал): крупным
+// блоком в спец-условиях (обычный постраничный обмен не трогаем). mode 0 —
+// замер записи, в ответ на него запускаем замер чтения (mode 1); обе цифры
+// копим в m_speedWrKbps и показываем W/R по приходу чтения.
+void MainWindow::showMemSpeed(int mode)
+{
+    if (!m_link->isOpen()) return;
+    const quint32 n     = quint32(qMax(1, ui->spinMemPages->value()));
+    // 03.08.2026: эталон теста скорости пишем в КОНЕЦ памяти (последние n страниц),
+    // а НЕ по «Старт», чтобы не портить служебную стр.0 (флаги) и данные в начале.
+    const quint32 start = (n < kFlashTotalPages) ? (kFlashTotalPages - n) : 0u;
+    m_speedBytes = qint64(n) * 256;
+    QByteArray p;
+    p.append(char(quint8(mode)));
+    for (int j = 0; j < 4; ++j) p.append(char((start >> (8*j)) & 0xFF));
+    for (int j = 0; j < 4; ++j) p.append(char((n     >> (8*j)) & 0xFF));
+    // Обе фазы (запись эталона / чтение) идут ~5 с по эталону RTC — таймаут 30 с.
+    ui->lblMemSpeed->setText(mode == 0 ? QStringLiteral("эталон…") : QStringLiteral("замер…"));
+    m_dev->setTimeout(30000);
+    requestCmd(LtpCmd::FLASH_SPEED_TEST, p, TagSpeedTest);
+}
+
+void MainWindow::updateOccupiedLabel()
+{
+    if (m_firstFreePage < 0) {
+        ui->lblImgPagesNA->setText(QStringLiteral(" "));
+        ui->lblImgPages->setText(QStringLiteral(" "));
+        ui->lblImgPagesNA->setStyleSheet(QString());
+        ui->lblImgPages->setStyleSheet(QString());
+        return;
+    }
+    // «Занято» = число реально записанных страниц от внутренней стр.0
+    // (экранная «1»). НЕ вычитаем kLogStartPage: в принятой нумерации
+    // проекта адрес 0 = страница 1, служебной страницы перед данными нет,
+    // поэтому вычет давал недосчёт на 1 — «призрак нуля» (26.07.2026).
+    const int usedPages = qMax(0, m_firstFreePage);
+    const int freePages = qMax(0, int(kFlashTotalPages) - m_firstFreePage);
+    ui->lblImgPagesNA->setText(QString::number(usedPages));
+    ui->lblImgPages->setText(QString::number(freePages));
+    ui->lblImgPagesNA->setStyleSheet(QStringLiteral("color:#C03030;font-weight:600;"));
+    ui->lblImgPages->setStyleSheet(QStringLiteral("color:#1D7A4C;font-weight:600;"));
 }
 
 void MainWindow::flashBinSearchSendNext()
@@ -5082,12 +6411,29 @@ void MainWindow::flashBinSearchSendNext()
         // Поиск завершён — lo == hi == первая свободная (или 65536 = Flash полна)
         m_firstFreePage = m_binSearch.lo;
         m_binSearch.running = false;
-        const int used = m_firstFreePage - int(kLogStartPage);
+        const int used = m_firstFreePage;
         const QString msg = (m_firstFreePage >= int(kFlashTotalPages))
             ? QStringLiteral("Flash: чип заполнен")
             : QStringLiteral("Flash: первая свободная стр. %1 (занято %2 стр.)")
-                  .arg(m_firstFreePage).arg(qMax(0, used));
+                  .arg(m_firstFreePage + 1).arg(qMax(0, used));
         appendLog(msg);
+        // «Занято» (22.07.2026, по просьбе) — сколько страниц занято по ВСЕМ
+        // операциям (образ + тест на стенде + т.д.) / сколько ещё свободно.
+        // Страницы, десятичное, красный/зелёный — обновляется при каждом
+        // пересчёте первой свободной страницы (после записи/стирания/подключения).
+        updateOccupiedLabel();
+        updateSaveSegment();   // занятость определилась → сегмент 0 (Стёрто/Сохранить/Сохранено)
+        // 03.08.2026: старое «самолечение флага» (слать 0x30=2 при пустой Flash)
+        // УБРАНО. Под NOR-флаги стр.0 флаг = само состояние памяти (не отдельная
+        // стр.122, которая могла залипнуть), рассинхрона нет; а 0x30=2 в новой
+        // прошивке = ВЗВОД «сохранение», что здесь было бы ложно.
+        // «Старт»/Задать → новая первая свободная (22.07.2026, по просьбе,
+        // только после «Образ» — не переписываем чужой ручной ввод «Старт»
+        // по любому другому поводу пересчёта).
+        if (m_syncStartAfterImage) {
+            m_syncStartAfterImage = false;
+            ui->spinMemStartPage->setValue(qBound(1, m_firstFreePage + 1, 65536));
+        }
         stendUpdateFlashStat();
         // Авто-дамп при входе на «Тест памяти» (17.07.2026): границы теперь
         // свежие → показываем реальное содержимое. Гейты: та же вкладка, не
@@ -5095,9 +6441,11 @@ void MainWindow::flashBinSearchSendNext()
         if (m_memAutoDumpPending) {
             m_memAutoDumpPending = false;
             if (ui->tabsMain->currentWidget() == ui->tabMemTest
-                && !m_test.running && !m_stendActive)
+                && !m_test.running && !m_stendActive) {
+                m_silentDump = true;
                 memTestDump(m_autoDumpStart, m_autoDumpCount);  // образ→свой диапазон,
                                                                 // иначе Старт/Страниц
+            }
             m_autoDumpStart = m_autoDumpCount = -1;
         }
         return;
@@ -5171,7 +6519,7 @@ void MainWindow::flashBinSearchUpdateUi()
         return;
     }
 
-    const int used  = qBound(0, m_firstFreePage - int(kLogStartPage), total);
+    const int used  = qBound(0, m_firstFreePage, total);
     const int free_ = total - used;
 
     // Адаптивный масштаб бара (04.07.2026, по запросу пользователя): при малой
@@ -5336,8 +6684,19 @@ void MainWindow::archiveParseRegistratorPage(const QByteArray &page, int pageOff
 {
     const auto *d = reinterpret_cast<const quint8 *>(page.constData());
 
-    for (int slot = 0; slot < kRegRecordsPerPage; ++slot) {
-        const quint8 *r = d + slot * kRecordBytes;   // v2, 48 байт (глоб. kRecordBytes)
+    // Формат «1 цикл = 1 слово» (28.07.2026): маркёр [0] выбирает формат.
+    // 0xFF → пустое слово = конец журнала; 0xF5 базовая / 0xF4 расширенная
+    // запись (базовая часть одинакова, лежит с offset 1).
+    const quint8 mark = d[0];
+    if (mark == 0xFF) {
+        m_arc.pageLimit = quint16(qMin<quint32>(m_arc.pageLimit, m_arc.pageStart + pageOffset));
+        return;
+    }
+    // Уплотнённое слово (0xF3) — до 5 записей 48Б в слоте; базовое (0xF5) /
+    // подробное (0xF4) — 1 запись. Слоты: offset 1 + slot*48.
+    const int nSlots = (mark == 0xF3) ? 5 : 1;
+    for (int slot = 0; slot < nSlots; ++slot) {
+        const quint8 *r = d + 1 + slot * 48;   // запись цикла с offset 1 + slot*48, 48 байт
         quint32 tsStart, duration, durationTotal;
         float   rpmMax, rpmAvg, vib1Peak, vib1Rms, vib2Peak, vib2Rms;
         std::memcpy(&tsStart,       r + 0,  4);
@@ -5349,6 +6708,9 @@ void MainWindow::archiveParseRegistratorPage(const QByteArray &page, int pageOff
         std::memcpy(&vib1Rms,       r + 24, 4);
         std::memcpy(&vib2Peak,      r + 28, 4);
         std::memcpy(&vib2Rms,       r + 32, 4);
+        const int tempC = int(quint8(r[36])) - 60;   // температура: raw = °C+60 (spec §v2)
+        quint16 clockEpoch;
+        std::memcpy(&clockEpoch, r + 40, 2);          // поколение часов [40..41] (LE)
         const quint16 crc = quint16(r[46]) | (quint16(r[47]) << 8);
         // Пока в графики/сводку кладём КАНАЛ 1 пик как «вибрацию» и rpm_max как
         // «скорость» — совместимо с текущим UI. vib1_rms / vib2_peak / vib2_rms
@@ -5369,10 +6731,15 @@ void MainWindow::archiveParseRegistratorPage(const QByteArray &page, int pageOff
         (void)rpmAvg; (void)vib1Rms; (void)vib2Rms;
 
         if (tsStart == 0xFFFFFFFFu) {
-            // Слот не записан — конец журнала (запись всегда строго
-            // последовательна, дальше на этой и следующих страницах пусто).
-            m_arc.pageLimit = quint16(qMin<quint32>(m_arc.pageLimit, m_arc.pageStart + pageOffset + 1));
-            return;
+            // Пустой слот. slot 0 — слово с маркёром, но без записи (аномалия/
+            // конец журнала) → клампим и выходим. slot>0 (уплотнённое) — конец
+            // записей ЭТОГО слова (норма); конец журнала определит пустое (0xFF)
+            // следующее слово, а здесь просто прекращаем читать слоты.
+            if (slot == 0) {
+                m_arc.pageLimit = quint16(qMin<quint32>(m_arc.pageLimit, m_arc.pageStart + pageOffset));
+                return;
+            }
+            break;
         }
 
         if (m_arc.records == 0 && m_arc.brokenRecords == 0)
@@ -5411,11 +6778,14 @@ void MainWindow::archiveParseRegistratorPage(const QByteArray &page, int pageOff
                 m_arc.plotRpm.append(double(maxRpm));
                 m_arc.plotTs.append(double(tsStart));
                 m_arc.plotDuration.append(double(duration));
+                m_arc.plotTemp.append(double(tempC));
+                m_arc.plotEpoch.append(double(clockEpoch));   // для линий стыков
             }
             // По-записные данные для stendShowDeviceLog() (см. ArchiveState)
             m_arc.recTs.append(tsStart);
             m_arc.recDur.append(duration != 0xFFFFFFFFu ? duration : 0);
             m_arc.recTotal.append(durationTotal != 0xFFFFFFFFu ? durationTotal : 0);
+            m_arc.recEpoch.append(clockEpoch);   // индекс-синхронно с recTs (для точек стыка)
         } else {
             ++m_arc.brokenRecords;
             m_arc.trailingOpen = true;
@@ -5478,6 +6848,7 @@ void MainWindow::archiveParseLoggerPage(const QByteArray &page, int pageOffset)
         if (duration != 0xFFFFFFFFu) {
             m_arc.plotKeys.append(double(m_arc.records));
             m_arc.plotDuration.append(double(duration));
+            m_arc.plotEpoch.append(0.0);   // Logger: поколение не хранится, стыков нет
         }
     }
     // 0xFD/0xFA/0xF8/0xF7 (страницы данных) для сводки вкладки «Данные» не нужны.
@@ -5506,6 +6877,7 @@ void MainWindow::archiveFinish()
             r.dur   = m_arc.recDur[i];
             r.total = m_arc.recTotal[i];
             r.rpm   = (i < m_arc.plotRpm.size()) ? int(m_arc.plotRpm[i] + 0.5) : 0;
+            r.epoch = (i < m_arc.recEpoch.size()) ? m_arc.recEpoch[i] : 0;
             m_offlDev.append(r);
         }
         m_offlDevSrc = QStringLiteral("память устройства");
@@ -5564,46 +6936,76 @@ void MainWindow::archiveUpdateDashboard()
             lTime->setText(dt.toString(QStringLiteral("HH:mm")));
             return;
         }
-        lDate->setText(dt.toString(QStringLiteral("dd.MM.yy")));
+        lDate->setText(dt.toString(QStringLiteral("yy.MM.dd")));   // ГГ.ММ.ДД — сортируется хронологически
         lTime->setText(dt.toString(QStringLiteral("HH:mm")));
     };
     fmtTs(m_arc.tsFirst, ui->lblFirstDate, ui->lblFirstTime);
     fmtTs(m_arc.tsLast,  ui->lblLastDate,  ui->lblLastTime);
 
-    ui->lblCyclesUsed->setText(m_arc.brokenRecords > 0
-        ? QStringLiteral("%1 (+%2 оборван)").arg(m_arc.records).arg(m_arc.brokenRecords)
-        : QString::number(m_arc.records));
+    // «записано» = число записанных циклов (завершённые + оборванные), числом и
+    // КРАСНЫМ — как «Занято» в «Тест памяти» (28.07.2026, по просьбе). Слово
+    // «оборван» из подписи убрано (обрезалось по ширине) — детализация в тултипе.
+    const qint64 usedCycles = qint64(m_arc.records) + m_arc.brokenRecords;
+    ui->lblCyclesUsed->setText(QString::number(usedCycles));
+    ui->lblCyclesUsed->setStyleSheet(QStringLiteral("color:#C03030;font-weight:600;"));
+    ui->lblCyclesUsed->setToolTip(m_arc.brokenRecords > 0
+        ? QStringLiteral("завершённых: %1, оборванных: %2")
+              .arg(m_arc.records).arg(m_arc.brokenRecords)
+        : QString());
 
     if (m_arc.mode == ArchiveMode::Registrator) {
-        // Упаковка по 10 записей/страницу (20.06.2026) — ёмкость и остаток
-        // считаются в записях (слотах), а не в страницах, как раньше.
-        const qint64 totalSlots = (qint64(kFlashTotalPages) - kLogStartPage) * kRegRecordsPerPage;
-        const qint64 usedSlots  = qint64(m_arc.records) + m_arc.brokenRecords;
-        ui->lblCyclesFree->setText(QString::number(qMax<qint64>(0, totalSlots - usedSlots)));
+        // Остаток циклов = свободные слова × записей-на-слово. Упаковку журнала
+        // детектим по факту: базовый ≈1 запись/слово, уплотнённый ≈5 (28.07.2026).
+        const int usedWords = qMax(0, int(m_arc.pageLimit) - int(kLogStartPage));
+        const qint64 usedCyclesLocal = qint64(m_arc.records) + m_arc.brokenRecords;
+        const int rpw = (usedWords > 0)
+            ? qMax(1, int((usedCyclesLocal + usedWords - 1) / usedWords)) : 1;
+        const qint64 freeWords = qMax(0, int(kFlashTotalPages) - int(kLogStartPage) - usedWords);
+        ui->lblCyclesFree->setText(QString::number(freeWords * rpw));
     } else {
         // Logger: 1 фрейм = 1 страница без изменений — остаток в страницах.
         const int pagesUsed = int(m_arc.pageLimit) - int(kLogStartPage);
         ui->lblCyclesFree->setText(QString::number(
             qint64(kFlashTotalPages) - kLogStartPage - qMax(0, pagesUsed)));
     }
+    // «доступно» — ЗЕЛЁНЫМ, как свободное в «Тест памяти» (28.07.2026).
+    ui->lblCyclesFree->setStyleSheet(QStringLiteral("color:#1D7A4C;font-weight:600;"));
 
     if (m_arc.mode == ArchiveMode::Registrator && m_arc.haveComplete) {
-        // «уровень» — потолок МАЛОГО масштаба (клип); «пики» — истинный максимум
-        // vib1 за журнал (19.07.2026, два графика одного сигнала).
-        double clampG = 0.2;
-        if (!m_arc.plotVibroRms.isEmpty()) {
-            QVector<double> s = m_arc.plotVibroRms;
-            std::sort(s.begin(), s.end());
-            clampG = qMax(200.0, s[s.size()/2] * 2.5) / 1000.0;
-        }
-        ui->lblMaxVibro->setText(QStringLiteral("≤%1 g").arg(clampG, 0, 'f', 2));
-        ui->lblMaxVibro2->setText(QStringLiteral("%1 g")
-            .arg(double(m_arc.maxVibro) / 1000.0, 0, 'f', 2));
-        ui->lblMaxSpeed->setText(QStringLiteral("%1 об/мин").arg(double(m_arc.maxRpm), 0, 'f', 1));
+        // «уровень» (RMS) — АВТОМАСШТАБ под реальный максимум уровня, БЕЗ насыщения
+        // (02.08.2026, идеология: график 1 не должен упираться в потолок; сильные
+        // удары относительно среднего уходят на «пики»/график 2). Метка = верх
+        // шкалы уровня в g. «пики» (m_valLbl[3]) — истинный максимум vib1 за журнал.
+        double lvlMaxG = 0.0;
+        for (double v : m_arc.plotVibroRms) lvlMaxG = qMax(lvlMaxG, v);
+        if (lvlMaxG < 200.0) lvlMaxG = 200.0;   // нижний предел (фон не раздуваем в шум)
+        if (m_valLbl[2]) m_valLbl[2]->setText(QStringLiteral("%1 g").arg(lvlMaxG * 1.1 / 1000.0, 0, 'f', 2));
+        if (m_valLbl[3]) m_valLbl[3]->setText(QStringLiteral("%1 g").arg(double(m_arc.maxVibro) / 1000.0, 0, 'f', 2));
+        if (m_valLbl[1]) m_valLbl[1]->setText(QStringLiteral("%1 о/м").arg(double(m_arc.maxRpm), 0, 'f', 0));
+        if (m_valLbl[0]) { double dmax = 0.0; for (double v : m_arc.plotDuration) dmax = qMax(dmax, v);
+          m_valLbl[0]->setText(QStringLiteral("%1 мин").arg(dmax / 60.0, 0, 'f', 0)); }
+        ui->plotUptime->replot(); ui->plotSpeed->replot(); ui->plotVibro->replot(); ui->plotVibro2->replot();
+        // Сводка по ВСЕМУ архиву — в верхнюю карточку (27.07.2026): суммарное
+        // время + максимумы скорости/удара/температуры за все измерения.
+        { double tmx = 0.0; for (double v : m_arc.plotTemp) tmx = qMax(tmx, v);
+          const quint32 tot = m_arc.durationTotal;
+          ui->lblDevCard->setText(QStringLiteral(
+              "<span style='font-size:8pt;color:#AAAAAA;'>работа </span>"
+              "<span style='font-size:13pt;font-weight:bold;color:#5B9BD5;'>%1час %2мин</span>"
+              "<span style='font-size:8pt;color:#AAAAAA;'>&nbsp;&nbsp;&nbsp;&nbsp;максимальные:&nbsp;&nbsp; скорость </span>"
+              "<span style='font-size:13pt;font-weight:bold;color:#35B597;'>%3 об/мин</span>"
+              "<span style='font-size:8pt;color:#AAAAAA;'>&nbsp;&nbsp;&nbsp;удар </span>"
+              "<span style='font-size:13pt;font-weight:bold;color:#E89A30;'>%4g</span>"
+              "<span style='font-size:8pt;color:#AAAAAA;'>&nbsp;&nbsp;&nbsp;температура </span>"
+              "<span style='font-size:13pt;font-weight:bold;color:#AB7FD9;'>%5 °C</span>")
+              .arg(tot / 3600).arg((tot % 3600) / 60)
+              .arg(double(m_arc.maxRpm), 0, 'f', 0)
+              .arg(double(m_arc.maxVibro) / 1000.0, 0, 'f', 1)
+              .arg(tmx, 0, 'f', 0)); }
     } else {
-        ui->lblMaxVibro->setText(QStringLiteral(" "));
-        ui->lblMaxVibro2->setText(QStringLiteral(" "));
-        ui->lblMaxSpeed->setText(QStringLiteral(" "));
+        for (int i = 0; i <= 4; ++i) if (m_valLbl[i]) m_valLbl[i]->setText(QString());
+        ui->plotUptime->replot(); ui->plotSpeed->replot(); ui->plotVibro->replot();
+        ui->plotVibro2->replot(); ui->plotTempArc->replot();
     }
 
     // «Активное время» — заливка-ступеньки (graph(0), см. setup): 1 ступень =
@@ -5625,8 +7027,12 @@ void MainWindow::archiveUpdateDashboard()
             static int s_lastBarsN = -1;
             if (n != s_lastBarsN) {
                 s_lastBarsN = n;
-                const double hi = qMax(double(n), double(kUptimeMinBars)) - 0.5;
-                const double lo = qMax(-0.5, double(n) - kUptimeDefaultBars - 0.5);
+                // Окно от НАЧАЛА заполненной области (02.08.2026, по просьбе): было
+                // «последние 60 циклов» (анкер к концу — графики выводились не
+                // сначала). Теперь показываем первые min(n, 60), но не уже 30.
+                const double lo = -0.5;
+                const double hi = qMax(double(kUptimeMinBars),
+                                       qMin(double(n), double(kUptimeDefaultBars))) - 0.5;
                 ui->plotUptime->xAxis->setRange(lo, hi);
             }
             ui->plotUptime->replot();
@@ -5637,24 +7043,36 @@ void MainWindow::archiveUpdateDashboard()
     }
 
     if (m_arc.mode == ArchiveMode::Registrator && !m_arc.plotKeys.isEmpty()) {
-        // ДВА РАЗНЫХ КАНАЛА vib1 (19.07.2026, «уровень не должен меняться на ударе»):
-        //  • График 1 «уровень» = vib1_RMS — среднеквадратичный, НЕ реагирует на
-        //    одиночный удар; Y фиксирован на малый масштаб (медиана RMS ×2.5).
+        // ДВА РАЗНЫХ КАНАЛА vib1 (19.07.2026 / правка 02.08.2026):
+        //  • График 1 «уровень» = vib1_RMS — среднеквадратичный, НЕ дёргается на
+        //    одиночном ударе → АВТОМАСШТАБ под свой максимум (без насыщения; клип
+        //    median×2.5 убран по идеологии: уровень должен работать нормально).
         //  • График 2 «пики» = vib1_peak — ловит удар; Y фикс. БОЛЬШОЙ масштаб
         //    (16 g), без ударов сидит у нуля, удар сразу до потолка.
-        double clamp = 200.0;
-        if (!m_arc.plotVibroRms.isEmpty()) {
-            QVector<double> s = m_arc.plotVibroRms;
-            std::sort(s.begin(), s.end());
-            clamp = qMax(200.0, s[s.size() / 2] * 2.5);
-        }
+        double lvlMax = 0.0;
+        for (double v : m_arc.plotVibroRms) lvlMax = qMax(lvlMax, v);
+        if (lvlMax < 200.0) lvlMax = 200.0;   // нижний предел масштаба (фон не в шум)
         if (m_vibBars)  { m_vibBars->setData(m_arc.plotKeys, m_arc.plotVibroRms);
-                          ui->plotVibro->yAxis->setRange(0, clamp);   // RMS, малый масштаб
+                          ui->plotVibro->yAxis->setRange(0, lvlMax * 1.1);   // автомасштаб уровня
                           ui->plotVibro->replot(); }
         if (m_vib2Bars) { m_vib2Bars->setData(m_arc.plotKeys, m_arc.plotVibro);   // ПИК
                           const double top = qMax(16000.0, double(m_arc.maxVibro) * 1.05);
                           ui->plotVibro2->yAxis->setRange(0, top);
                           ui->plotVibro2->replot(); }
+        // График 5 — температура (27.07.2026): столбики от 0 до макс+запас.
+        if (m_tempBars) {
+            m_tempBars->setData(m_arc.plotKeys, m_arc.plotTemp);
+            double tmax = 40.0;
+            for (double v : m_arc.plotTemp) tmax = qMax(tmax, v);
+            // Небольшой отступ снизу (28.07.2026): низ графика «приседал» к самой
+            // границе панели — даём нижнее поле ~8 %, столбики приподнимаются.
+            ui->plotTempArc->yAxis->setRange(-tmax * 0.08, tmax * 1.1);
+            ui->plotTempArc->replot();
+            const QString tmaxTxt = m_arc.plotTemp.isEmpty()
+                ? QStringLiteral(" ") : QStringLiteral("%1 °C").arg(tmax, 0, 'f', 0);
+            if (m_valLbl[4]) m_valLbl[4]->setText(tmaxTxt);   // вертикально справа
+            ui->lblTempMax->setText(tmaxTxt);   // панель «Температура · макс»
+        }
         // Гироскоп — столбики (18.07.2026); ось X подтянется синхронизацией
         // от plotUptime (setRange ниже по коду рендера uptime).
         if (m_speedBars) {
@@ -5671,10 +7089,50 @@ void MainWindow::archiveUpdateDashboard()
         ui->plotVibro->replot();
         if (m_vib2Bars) m_vib2Bars->data()->clear();
         ui->plotVibro2->replot();
+        if (m_tempBars) m_tempBars->data()->clear();
+        ui->plotTempArc->replot();
         if (m_speedBars) m_speedBars->data()->clear();
         ui->plotSpeed->replot();
     }
+    archiveDrawSeams();   // вертикальные линии стыков времени поверх столбиков
     updateCycleScroll();
+}
+
+// Вертикальные линии стыков времени на 5 графиках «Данных» (02.08.2026): там,
+// где меняется поколение часов (plotEpoch) между соседними циклами, — прибор
+// терял питание и часы обнулялись, абсолютное время дальше идёт от нуля. Линия
+// рисуется по X между соседними столбиками (индекс-координаты, как у QCPBars).
+void MainWindow::archiveDrawSeams()
+{
+    // Снять прежние линии (перерисовка на каждый разбор/живой пуш).
+    for (QCPItemStraightLine *ln : m_seamItems)
+        if (ln && ln->parentPlot()) ln->parentPlot()->removeItem(ln);
+    m_seamItems.clear();
+
+    if (m_arc.mode != ArchiveMode::Registrator) return;
+    const int n = qMin(m_arc.plotKeys.size(), m_arc.plotEpoch.size());
+    if (n < 2) return;
+
+    QCustomPlot *plots[] = { ui->plotUptime, ui->plotSpeed, ui->plotVibro,
+                             ui->plotVibro2, ui->plotTempArc };
+    bool any = false;
+    for (int i = 1; i < n; ++i) {
+        if (m_arc.plotEpoch[i] == m_arc.plotEpoch[i - 1]) continue;
+        const double x = (m_arc.plotKeys[i] + m_arc.plotKeys[i - 1]) / 2.0;  // между столбиками
+        for (QCustomPlot *p : plots) {
+            auto *ln = new QCPItemStraightLine(p);
+            ln->point1->setCoords(x, 0.0);
+            ln->point2->setCoords(x, 1.0);   // две точки с одним X → вертикаль
+            QPen pen(QColor(0xF0, 0xC0, 0x40));   // янтарная пунктирная — «стык»
+            pen.setStyle(Qt::DashLine);
+            pen.setWidthF(1.4);
+            ln->setPen(pen);
+            m_seamItems.append(ln);
+        }
+        any = true;
+    }
+    if (any)
+        for (QCustomPlot *p : plots) p->replot();
 }
 
 // Хвост archiveFinish (лог + границы образа) — только после ПОЛНОГО разбора
@@ -5692,19 +7150,12 @@ void MainWindow::archiveFinishTail()
             .arg(m_arc.haveDuration ? QString::number(m_arc.durationTotal) + " с" : QStringLiteral(" "))
             .arg(m_arc.trailingOpen ? QStringLiteral(", последний цикл не завершён") : QString()));
 
-    // «Образ: страниц» / «Образ: начало» — обновляем реальными границами из Flash
-    // после завершения архивного сканирования. Раньше эти поля заполнялись ТОЛЬКО
-    // после записи тестового образа в текущей сессии, из-за чего «Прочитать» не
-    // работала для реальных данных устройства. Теперь работает всегда (01.07.2026).
-    if (m_arc.pageLimit > kLogStartPage) {
-        ui->lblImgAddr->setText(QString::number(kLogStartPage));
-        ui->lblImgPages->setText(QString::number(m_arc.pageLimit - kLogStartPage));
-        ui->btnMemReadImg->setEnabled(true);
-    } else {
-        ui->lblImgAddr->setText(QStringLiteral(" "));
-        ui->lblImgPages->setText(QStringLiteral(" "));
-        ui->btnMemReadImg->setEnabled(false);
-    }
+    // «Размер»/«Загрузка» — НЕ трогаем здесь (22.07.2026, по замечанию: эти
+    // поля теперь показывают результат последней ЗАПИСИ ОБРАЗА, а не границы
+    // архивного скана — их перезапись отсюда путала, «сбрасывая» правильный
+    // адрес записи на что-то другое сразу после загрузки). «Прочитать» и так
+    // берёт диапазон из спинбоксов «Старт»/«Страниц», эти подписи ей не нужны.
+    ui->btnMemReadImg->setEnabled(m_arc.pageLimit > kLogStartPage);
 }
 
 // «Прочитать» (замена «Сравнить», решение 20.06.2026): читает Flash в
@@ -5727,10 +7178,11 @@ void MainWindow::archiveFinishTail()
 void MainWindow::memTestDump(int startOverride, int countOverride)
 {
     if (!m_link->isOpen()) {
+        m_silentDump = false;   // дамп не стартовал — флаг «тихого» не должен зависнуть
         ui->memReport->appendPlainText(QStringLiteral("⚠ Нет подключения"));
         return;
     }
-    if (m_test.running) return;
+    if (m_test.running) { m_silentDump = false; return; }
 
     quint16 start;
     int     count;
@@ -5745,7 +7197,7 @@ void MainWindow::memTestDump(int startOverride, int countOverride)
         // kAutoDumpMaxPages — чтобы вход был мгновенным и не завис на большом
         // «Страниц». Полный заданный диапазон читает ручное «Прочитать» (оно
         // вызывает memTestDump с явным override, минуя это ограничение).
-        start = quint16(ui->spinMemStartPage->value());
+        start = quint16(ui->spinMemStartPage->value() - 1);
         count = qMin(qMax(1, ui->spinMemPages->value()), kAutoDumpMaxPages);
     }
 
@@ -5758,7 +7210,6 @@ void MainWindow::memTestDump(int startOverride, int countOverride)
     m_test.cycleTotal = 1;
     m_test.pagesDone  = 0;
     m_test.lastReadByte    = -1;   // «Байт» Факт — пусто до первого чтения
-    m_test.lastReadUniform = true;
     m_dumpBuf.clear();
 
     ui->memReport->appendPlainText(QStringLiteral(
@@ -5785,7 +7236,7 @@ void MainWindow::renderHexDump(quint16 startPage, const QByteArray &buf)
         if (off > 0 && off % pageBytes == 0)
             out += QString(60, QChar(0x2500)) + QLatin1Char('\n');
         const quint32 addr = (quint32(startPage) << 8) + quint32(off);
-        out += QStringLiteral("  %1:  ").arg(addr, 6, 16, QLatin1Char('0')).toUpper();
+        out += QStringLiteral(" %1: ").arg(addr, 6, 16, QLatin1Char('0')).toUpper();
         QStringList words;
         for (int w = 0; w < wordsPerLine; ++w) {
             const int i = off + w * 2;
@@ -5820,7 +7271,7 @@ void MainWindow::memTestUpdateUi()
     // Начальное состояние (ни одной операции не запускали) — пустые ячейки
     if (m_test.pageTotal == 0) {
         for (QLabel *l : {ui->lblCurCycle, ui->lblCurPages, ui->lblCurActivePage,
-                          ui->lblCurByte, ui->lblCurErrors, ui->lblCurSpi, ui->lblCurStep})
+                          ui->lblCurByte, ui->lblCurErrors})
             { l->setText(QStringLiteral(" ")); l->setStyleSheet(QString()); }
         return;
     }
@@ -5863,39 +7314,23 @@ void MainWindow::memTestUpdateUi()
     ui->lblCurPages->setText(QString::number(pageCurInCycle));
     ui->lblCurPages->setStyleSheet(QString());
 
-    // Страница Факт = адрес текущей страницы
-    ui->lblCurActivePage->setText(QString::number(pg));
+    // Страница Факт = адрес текущей страницы (22.07.2026: hex, как и «Задать»)
+    ui->lblCurActivePage->setText(QString::number(pg + 1));
     ui->lblCurActivePage->setStyleSheet(QString());
 
     // «Байт» Факт — реально ПРОЧИТАННЫЙ с устройства байт, не эхо поля
     // «Задать» (баг до 02.07.2026 — сюда копировался editTestByte, ячейка
     // «факт» ничего не проверяла, замечено пользователем). Пока ни одного
     // чтения не было (фаза записи, старт теста) — пусто (пробел, см.
-    // соглашение UI). Неоднородная страница (дамп реальных данных) —
-    // показан первый байт + «…».
+    // соглашение UI). «…» убрано (22.07.2026, по замечанию: не должно быть
+    // домысливания — только реально прочитанное значение, ничего сверх).
     if (m_test.lastReadByte >= 0) {
-        QString b = QStringLiteral("%1")
-            .arg(m_test.lastReadByte, 2, 16, QLatin1Char('0')).toUpper();
-        if (!m_test.lastReadUniform) b += QStringLiteral("…");
-        ui->lblCurByte->setText(b);
+        ui->lblCurByte->setText(QStringLiteral("%1")
+            .arg(m_test.lastReadByte, 2, 16, QLatin1Char('0')).toUpper());
     } else {
         ui->lblCurByte->setText(QStringLiteral(" "));
     }
     ui->lblCurByte->setStyleSheet(QString());
-
-    ui->lblCurSpi->setText(QString::number(ui->spinMemSpi->value()));
-    ui->lblCurSpi->setStyleSheet(QString());
-
-    // Шаг операции (col 1 строки Ошибок)
-    switch (m_test.step) {
-    case TestStep::Write:   ui->lblCurStep->setText(QStringLiteral("Запись"));   break;
-    case TestStep::Read:    ui->lblCurStep->setText(QStringLiteral("Чтение"));   break;
-    case TestStep::Compare: ui->lblCurStep->setText(QStringLiteral("Сравн."));   break;
-    case TestStep::Dump:    ui->lblCurStep->setText(QStringLiteral("Дамп"));     break;
-    case TestStep::Done:    ui->lblCurStep->setText(QStringLiteral("Готово"));   break;
-    default:                ui->lblCurStep->setText(QStringLiteral(" "));        break;
-    }
-    ui->lblCurStep->setStyleSheet(QString());
 
     const bool hasErr = (m_test.errTotal > 0);
     ui->lblCurErrors->setText(hasErr
@@ -5925,20 +7360,48 @@ QString MainWindow::tempRunSensorName() const
 void MainWindow::tempRunStart()
 {
     if (m_tempRun.running) return;
+    // Старт термотеста — с ПЕРВОЙ СВОБОДНОЙ страницы (22.07.2026, по
+    // просьбе: тот же принцип, что и у «Загрузка» образа — стирание больше
+    // не делаем нигде без явной причины, данные накапливаются). Раньше брали
+    // «Старт» из таблицы (могло указывать в середину/на уже занятое место).
+    if (m_firstFreePage < 0) {
+        appendLog(QStringLiteral("⚠ Термотест: первая свободная страница ещё не известна — "
+                                  "подождите сканирование Flash и повторите"));
+        return;
+    }
+    if (m_firstFreePage >= int(kFlashTotalPages)) {
+        appendLog(QStringLiteral("⚠ Термотест: свободного места нет — Flash полностью занята"));
+        return;
+    }
+    const int passesPerStep = qMax(1, ui->spinMemPages->value());
+    if (m_firstFreePage + passesPerStep > int(kFlashTotalPages)) {
+        appendLog(QStringLiteral("⚠ Термотест: недостаточно свободного места (нужно %1 стр., "
+                                  "доступно %2 стр. с текущей позиции)")
+                       .arg(passesPerStep).arg(int(kFlashTotalPages) - m_firstFreePage));
+        return;
+    }
+    // «Загрузка»/Факт — отражаем стартовый (реальный) адрес термотеста
+    // (22.07.2026, по просьбе: колонка «Задать» у Загрузка убрана целиком,
+    // осталось только «Факт» — сюда и пишем адрес операции).
+    const int grpStartAddr = qMax(int(m_firstFreePage), int(kLogStartPage));
+    ui->lblImgAddr->setText(QStringLiteral("0x") + QString::number(qint64(grpStartAddr) * 256, 16).rightJustified(8, QLatin1Char('0')).toUpper());
     m_tempRun.running  = true;
     setOpsEnabled(false, ui->btnTempRun);
     m_tempRun.halted   = false;
     m_tempRun.step     = TempRunStep::Idle;
-    // Диапазон термотеста берём ИЗ ТАБЛИЦЫ (17.07.2026): стартовая страница и
-    // число страниц — те же поля «Страница»/«Страниц», что у Записи/Чтения.
+    // Диапазон термотеста — от первой свободной страницы (см. выше), не из
+    // таблицы «Старт»/«Страниц» (та осталась только у Записи/Чтения теста).
     // Обход — по кругу в пределах [start, start+count) (инкремент page в
     // обработчике TagTempRun). Раньше шёл по всему чипу и вдобавок выставлял
     // spinMemPages=65536, из-за чего потом вешалось стирание страниц.
-    m_tempRun.rangeStart     = quint16(ui->spinMemStartPage->value());
+    // Старт групповой операции — не ниже kLogStartPage: служебную стр.0
+    // (адрес 0) групповые обходят, пишут с адреса стр.1 (26.07.2026).
+    const int grpStart = qMax(int(m_firstFreePage), int(kLogStartPage));
+    m_tempRun.rangeStart     = quint16(grpStart);
     // «Проходов» — сколько страниц (от «Старт») прогоняется на КАЖДОЙ температурной
     // точке (17.07.2026). Отдельное поле, не завязано на «Страниц» (то — для байт-
     // теста). Блок [Старт, Старт+проходов) пишется/сверяется при каждом шаге °C.
-    m_tempRun.passesPerStep   = qMax(1, ui->spinTPasses->value());
+    m_tempRun.passesPerStep   = passesPerStep;
     m_tempRun.pagesLeftInStep = 0;
     m_tempRun.page            = m_tempRun.rangeStart;
     // Байт-шаблон берём из «Задать: Байт» (17.07.2026) — раньше термотест писал
@@ -5951,7 +7414,9 @@ void MainWindow::tempRunStart()
     m_tempRun.opCount  = 0;
     m_tempRun.errCount = 0;
     // Инициализируем Факт-колонку для отображения хода термотеста
-    m_test.pageTotal  = 1;
+    // (22.07.2026: pageTotal = passesPerStep, не 1 — иначе «Страниц»/Факт
+    // застревал на «1», деление по модулю 1 всегда даёт 0/1)
+    m_test.pageTotal  = passesPerStep;
     m_test.pageStart  = m_tempRun.page;
     m_test.pageCur    = 0;
     m_test.errTotal   = 0;
@@ -5960,7 +7425,6 @@ void MainWindow::tempRunStart()
     m_test.cycleTotal = 9999;   // число операций заранее неизвестно
     m_test.pagesDone  = 0;
     m_test.lastReadByte    = -1;   // «Байт» Факт — пусто до первого чтения
-    m_test.lastReadUniform = true;
     memTestUpdateUi();
     m_tempBlink = true;
     ui->btnTempRun->setText(QStringLiteral("🌡 Стоп"));
@@ -6075,6 +7539,50 @@ void MainWindow::activationSetSector(int idx, ActivationBar::SectorState st)
     ui->barActivation->setSectorState(idx, st);
 }
 
+// Сегмент 0 ленты по флагу данных + занятости Flash (28.07.2026). Приоритет:
+// (1) Flash ПУСТА (первая страница чистая) → жёлтый «Стёрто» — данных нет,
+//     красный неуместен даже при залипшем флаге; (2) флаг взведён → красный
+//     «Сохранить» (есть несохранённые данные, первая страница заполнена);
+//     (3) иначе → зелёный «Сохранено» (данные есть и сохранены). Во время волны
+// активации сегмент 0 ведёт сама волна — не перебиваем.
+void MainWindow::updateSaveSegment()
+{
+    // Во время ИДУЩЕЙ волны сегмент 0 ведёт активация; после (Idle/Done/Error) —
+    // можно обновлять (после активации пустая память → «Стёрто»).
+    if (m_act.step != ActStep::Idle && m_act.step != ActStep::Done
+            && m_act.step != ActStep::Error) return;
+    // 03.08.2026: сегмент 0 — «нужно сохранить результат или нет». КРАСНЫЙ только
+    // когда есть НЕСОХРАНЁННЫЕ данные (данные_есть [1] И сохранение [2] чист);
+    // иначе (нет данных, напр. после активации на чистом чипе, ИЛИ уже сохранено)
+    // — зелёный «Сохранено». Слова «Стёрто» тут нет (содержимое памяти — сегмент
+    // «Память» [4]). m_dataFlagSet = m_dataPresent && !m_dataSaved.
+    QString name; ActivationBar::SectorState st;
+    if (m_dataFlagSet)       { name = QStringLiteral("Сохранить"); st = ActivationBar::SectorState::Idle;     }  // красный — есть несохранённые
+    else                     { name = QStringLiteral("Сохранено"); st = m_saveWasWave
+                                   ? ActivationBar::SectorState::Done       // зелёный — после волны
+                                   : ActivationBar::SectorState::Active; }  // жёлтый — одиночное
+    ui->barActivation->setSectorName(0, name);
+    ui->barActivation->setSectorState(0, st);
+}
+
+// Трёхпозиционное состояние активации (§2.4) для панели «Журналы и обслуживание»
+// (FLASH STM). «Между жизнями» = активирован, но флаг несохранённых снят (данные
+// сохранены/стёрты, прибор ждёт следующий рабочий цикл) — раньше это состояние
+// нигде не показывалось. 03.08.2026.
+void MainWindow::updateActivationState()
+{
+    // «Состояние» на «FLASH STM» — по флагам [0]активирован/[2]сохранение, три
+    // чистых состояния (03.08.2026, «между жизнями» — лишний термин, убран):
+    //   [0] чист            → не активирован
+    //   [0] есть, [2] чист   → активирован
+    //   [0] есть, [2] есть   → деактивирован (сохранение выполнено)
+    QString s;
+    if (!m_deviceActivated)  s = QStringLiteral("не активирован");
+    else if (!m_dataSaved)   s = QStringLiteral("активирован");
+    else                     s = QStringLiteral("деактивирован");
+    if (ui->lblActState) ui->lblActState->setText(s);
+}
+
 // Мин. видимая длительность жёлтого (21.07.2026, см. комментарий в mainwindow.h).
 namespace { constexpr qint64 kActMinVisibleMs = 400; }
 
@@ -6116,50 +7624,71 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *ev)
 void MainWindow::onActivationSectorClicked(int idx)
 {
     if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-    // В симуляции клик просто зеленит сектор (демо, без реальных операций).
+    // Лента = карта активации (28.07.2026): сегменты 1..7 — ИНДИКАТОРЫ состояния
+    // (цвет ведёт волна ▶ / флаг / GET_STATS), клик по ним ничего не запускает —
+    // вся активация ТОЛЬКО по кнопке ▶. Кликом работает лишь сегмент 0
+    // «Сохранить данные» (сохранение на диск + сброс флага), в т.ч. в операторе.
+    // Одиночный клик по сегменту = выполнить ЕГО операцию, сегмент → ЖЁЛТЫЙ
+    // (Active) на время; ▶ по-прежнему прогоняет все шаги подряд зелёным
+    // (02.08.2026, восстановлено: 28.07 клики отключили, оставив ленту как
+    // индикаторы — по просьбе вернули поштучный запуск для 0/2/3). Симуляция —
+    // просто демо-зелёный, без реальных команд.
     if (ui->chkSimulation->isChecked()) {
         activationSetSector(idx, ActivationBar::SectorState::Done);
         return;
     }
-    switch (idx) {
-    case 0:   // Стереть данные — НОВАЯ команда FLASH_ERASE_DATA (0x2A, 21.07.2026),
-              // ОТДЕЛЬНАЯ от FLASH_ERASE (0x05, весь чип). Счётчики (iflash) НЕ трогает.
-        // ⚠ ПРОШИВКА: обработчик 0x2A ещё не добавлен в com.c (см. devicecontroller.h) —
-        // до этого регистратор ответит LTP_ERR_UNKNOWN_CMD, это ожидаемо, не баг LOGLSMW.
-        if (QMessageBox::question(this, QStringLiteral("Стирание данных"),
-                QStringLiteral("Стереть данные (NOR, со страницы 1)? Служебная "
-                    "страница 0 и счётчики перезапусков (внутренняя Flash STM32) "
-                    "НЕ затрагиваются."))
-            != QMessageBox::Yes) return;
-        activationSetSector(0, ActivationBar::SectorState::Active);   // остаётся жёлтым по завершении (одиночный клик)
-        requestCmd(LtpCmd::FLASH_ERASE_DATA, {}, TagManual);
-        appendLog(QStringLiteral("[Активация] сегмент 1 — стирание данных (0x2A)"));
-        break;
-    case 1:   // Сброс перезапусков (журнал iflash).
-        if (QMessageBox::question(this, QStringLiteral("Сброс перезапусков"),
-                QStringLiteral("Обнулить счётчики «Перезапуски по питанию/таймеру»?"))
-            != QMessageBox::Yes) return;
-        activationSetSector(1, ActivationBar::SectorState::Active);
-        m_actWdtPending   = true;   // остаётся жёлтым по факту GET_STATS ниже (обработчик LtpCmd::GET_STATS)
-        m_actWdtActiveMs  = QDateTime::currentMSecsSinceEpoch();
-        requestCmd(LtpCmd::RESET_STATS, {}, TagManual);
-        requestCmd(LtpCmd::GET_STATS,   {}, TagManual);
-        appendLog(QStringLiteral("[Активация] сегмент 2 — сброс перезапусков"));
-        break;
-    case 2:   // Синхро время = та же ⌚ (по границе секунды). Сегмент —
-              // Active сразу, Done только по контрольному чтению (GET_DATETIME
-              // с TagSyncTime, оно уже шлётся из btnSyncTime сразу после SET_DATETIME).
-        activationSetSector(2, ActivationBar::SectorState::Active);
-        m_actSyncPending  = true;
-        m_actSyncActiveMs = QDateTime::currentMSecsSinceEpoch();
-        ui->btnSyncTime->click();
-        appendLog(QStringLiteral("[Активация] сегмент 3 — синхронизация времени"));
-        break;
-    default:  // Сегменты 3..7 — функция ещё не назначена (заполним слева направо).
-        appendLog(QStringLiteral("[Активация] сегмент %1 — функция ещё не назначена")
-            .arg(idx + 1));
-        break;
+    // Режимное правило (02.08.2026, окончательно): в ОПЕРАТОРЕ работают только
+    // «Сохранить» (0 — посмотреть файл заранее) и активация (кнопка ▶). Рабочие
+    // кнопки «Сброс WDT» (1) и «Синхро время» (2) — ТОЛЬКО в «Сервис».
+    if ((idx == 1 || idx == 2) && !m_serviceMode) {
+        appendLog(QStringLiteral("«Сброс WDT» / «Синхро время» доступны только в режиме «Сервис»"));
+        return;
     }
+    if (idx == 1) {          // «Сброс WDT» → RESET_STATS (обнулить счётчики рестартов)
+        m_actWdtActiveMs = QDateTime::currentMSecsSinceEpoch();
+        m_actWdtPending  = true;
+        activationSetSector(1, ActivationBar::SectorState::Active);   // жёлтый — идёт
+        requestCmd(LtpCmd::RESET_STATS, {}, TagManual);
+        requestCmd(LtpCmd::GET_STATS,   {}, TagManual);   // перечитать счётчики → индикатор
+        appendLog(QStringLiteral("[TX] Сброс счётчиков рестартов (WDT)"));
+        return;
+    }
+    if (idx == 2) {          // «Синхро время» → SET_DATETIME по границе секунды,
+                             // НАПРЯМУЮ (как WDT через requestCmd), НЕ через
+                             // btnSyncTime->click(): клик по кнопке проходит только
+                             // если она включена, а командные кнопки бывают временно
+                             // отключены → синхро уходило вхолостую. Резолв сегмента —
+                             // на КОНТРОЛЬНОМ чтении (gate tag==TagSyncTime в
+                             // обработчике GET_DATETIME), чтобы фоновый опрос (~1 Гц)
+                             // не «съедал» pending. (02.08.2026)
+        m_actSyncActiveMs = QDateTime::currentMSecsSinceEpoch();
+        m_actSyncPending  = true;
+        activationSetSector(2, ActivationBar::SectorState::Active);   // жёлтый — идёт
+        const int msToEdge = 1000 - QTime::currentTime().msec();
+        QTimer::singleShot(msToEdge, this, [this] {
+            const QDateTime now = QDateTime::currentDateTime();
+            QByteArray p;
+            p.append(char(now.date().year() - 2000));
+            p.append(char(now.date().month()));
+            p.append(char(now.date().day()));
+            p.append(char(now.time().hour()));
+            p.append(char(now.time().minute()));
+            p.append(char(now.time().second()));
+            requestCmd(LtpCmd::SET_DATETIME, p, TagManual);
+            requestCmd(LtpCmd::GET_DATETIME, {}, TagSyncTime);   // контроль → сегмент 2
+            appendLog(QStringLiteral("[TX] Синхро время ← ПК (по границе секунды)"));
+        });
+        return;
+    }
+    if (idx != 0) {
+        appendLog(QStringLiteral("Сегмент — индикатор; запускается волной ▶ "
+                                 "(поштучно кликом работают «Сохранить»/«Сброс WDT»/«Синхро время»)"));
+        return;
+    }
+    // «Сохранить данные»: политика §3.2 (активирован→в файл принудительно; не
+    // активирован→спросить [в файл]/[без файла]/[отмена]). Работает и на красном
+    // (первый раз), и на зелёном (ещё раз/другой путь).
+    dataSaveFlow();
 }
 
 void MainWindow::activationFail(const QString &reason)
@@ -6167,11 +7696,12 @@ void MainWindow::activationFail(const QString &reason)
     int sec = -1;
     switch (m_act.step) {
     case ActStep::Archive:   sec = 0; break;
-    case ActStep::Check:     sec = 1; break;
-    case ActStep::SyncTime:  sec = 2; break;
-    case ActStep::Erase:     sec = 3; break;
-    case ActStep::TestWrite: sec = 4; break;
-    case ActStep::SetReady:  sec = 5; break;
+    case ActStep::Check:     sec = 3; break;   // Проверка → сегмент 3
+    case ActStep::ResetWdt:  sec = 1; break;   // Сброс WDT → сегмент 1
+    case ActStep::SyncTime:  sec = 2; break;   // Синхро время → сегмент 2
+    case ActStep::Erase:     sec = 4; break;
+    case ActStep::TestWrite: sec = 5; break;
+    case ActStep::SetReady:  sec = -1; break;   // сегмент «Активация» убран — ошибку не красим
     default: break;
     }
     if (sec >= 0) activationSetSector(sec, ActivationBar::SectorState::Error);
@@ -6216,26 +7746,30 @@ void MainWindow::activationBeginStep(ActStep step)
     switch (step) {
 
     case ActStep::Archive:
-        ui->lblActStatus->setText(QStringLiteral("Шаг 1: автоархив…"));
+        // Шаг 1 — по ФЛАГУ: читаем флаг «несохранённые данные» (0x30=0).
+        // Взведён → уходим в сохранение (startDataDump); сброшен → данные уже
+        // сохранены (или их нет) → сразу следующий пункт.
+        ui->lblActStatus->setText(QStringLiteral("Шаг 1: проверка флага данных…"));
         activationSetSector(0, ActivationBar::SectorState::Active);
-        {   QByteArray p;
-            const quint32 addr = 0x000100u;    // первая запись лога
-            for (int i = 0; i < 4; ++i) p.append(char((addr >> (8*i)) & 0xFF));
-            const quint32 sz = 30;
-            for (int i = 0; i < 4; ++i) p.append(char((sz >> (8*i)) & 0xFF));
-            requestCmd(LtpCmd::FLASH_READ, p, TagAct);
-        }
+        requestCmd(LtpCmd::DATA_FLAG, QByteArray(1, char(0)), TagAct);
         break;
 
     case ActStep::Check:
         ui->lblActStatus->setText(QStringLiteral("Шаг 2: проверка устройства…"));
-        activationSetSector(1, ActivationBar::SectorState::Active);
+        activationSetSector(3, ActivationBar::SectorState::Active);   // Проверка = сегмент 3
         requestCmd(LtpCmd::WHO_AM_I, {}, TagAct);
         break;
 
+    case ActStep::ResetWdt:
+        ui->lblActStatus->setText(QStringLiteral("Шаг 3: сброс счётчиков рестартов…"));
+        activationSetSector(1, ActivationBar::SectorState::Active);   // Сброс WDT = сегмент 1
+        requestCmd(LtpCmd::RESET_STATS, {}, TagAct);
+        requestCmd(LtpCmd::GET_STATS,   {}, TagAct);   // контроль: счётчики обнулены
+        break;
+
     case ActStep::SyncTime:
-        ui->lblActStatus->setText(QStringLiteral("Шаг 3: синхронизация времени…"));
-        activationSetSector(2, ActivationBar::SectorState::Active);
+        ui->lblActStatus->setText(QStringLiteral("Шаг 4: синхронизация времени…"));
+        activationSetSector(2, ActivationBar::SectorState::Active);   // Синхро время = сегмент 2
         {   const QDateTime now = QDateTime::currentDateTime();
             const QDate nd = now.date(); const QTime nt = now.time();
             QByteArray p;
@@ -6254,15 +7788,15 @@ void MainWindow::activationBeginStep(ActStep step)
         break;
 
     case ActStep::Erase:
-        ui->lblActStatus->setText(QStringLiteral("Шаг 4: стирание памяти…"));
-        activationSetSector(3, ActivationBar::SectorState::Active);
+        ui->lblActStatus->setText(QStringLiteral("Шаг 5: стирание памяти…"));
+        activationSetSector(4, ActivationBar::SectorState::Active);
         m_eraseStartMs = QDateTime::currentMSecsSinceEpoch();
         requestCmd(LtpCmd::FLASH_ERASE, {}, TagAct);
         break;
 
     case ActStep::TestWrite:
-        ui->lblActStatus->setText(QStringLiteral("Шаг 5: проверка записи…"));
-        activationSetSector(4, ActivationBar::SectorState::Active);
+        ui->lblActStatus->setText(QStringLiteral("Шаг 6: проверка записи…"));
+        activationSetSector(5, ActivationBar::SectorState::Active);
         {   QByteArray p;
             p.append(char(0)); p.append(char(0));       // страница 0
             p.append(QByteArray(256, char(0x55)));
@@ -6271,18 +7805,34 @@ void MainWindow::activationBeginStep(ActStep step)
         break;
 
     case ActStep::SetReady:
-        ui->lblActStatus->setText(QStringLiteral("Шаг 6: постановка на готовность…"));
-        activationSetSector(5, ActivationBar::SectorState::Active);
-        requestCmd(LtpCmd::START_REGISTER, {}, TagAct);
+        // Сегмент «Активация» убран (02.08.2026) — шаг выполняется, но своего
+        // индикатора не красит: результат виден в правой панели (запись+дата) и
+        // по общей зелёной ленте.
+        ui->lblActStatus->setText(QStringLiteral("Шаг 7: постановка на готовность…"));
+        {   // Поставить ts_activation (0x30=1 пишет ts в стр.121 + побочно флаг
+            // стр.122). Следующей фазой (в activationHandleResponse) флаг сбросим
+            // (0x30=2) → «Сохранено» зелёный, ts на стр.121 уцелеет.
+            QByteArray p; p.append(char(1));
+            const quint32 nowTs = quint32(QDateTime::currentSecsSinceEpoch());
+            for (int j = 0; j < 4; ++j) p.append(char((nowTs >> (8 * j)) & 0xFF));
+            requestCmd(LtpCmd::DATA_FLAG, p, TagAct);
+        }
         break;
 
     case ActStep::Done:
-        for (int i = 0; i < 6; ++i)
+        // Сегменты 1..5 (Сброс WDT/Синхро/Датчики/Память/Тест записи) — зелёные.
+        // Сегмент 0 «Сохранено» — ЗЕЛЁНЫЙ (результат волны): взводим m_saveWasWave,
+        // чтобы updateSaveSegment красил зелёным, а не жёлтым (одиночным).
+        // Флаг покраснеет сам, когда прибор запишет цикл.
+        // Сегмент 6 (VBAT) волна не трогает — отдельный индикатор.
+        m_saveWasWave = true;
+        for (int i = 1; i < 6; ++i)
             activationSetSector(i, ActivationBar::SectorState::Done);
-        ui->lblActStatus->setText(QStringLiteral("✓ ГОТОВ — отключите сервисный кабель"));
+        ui->lblActStatus->setText(QStringLiteral("✓ АКТИВИРОВАН — отключите сервисный кабель"));
         ui->btnActivate->setText(QStringLiteral("▶"));
         appendLog(QStringLiteral("[ACT] Активация завершена"));
         ui->btnTempRun->setEnabled(true);
+        requestCmd(LtpCmd::GET_STATS, {}, TagManual);   // обновить панель «Активация» (активирован + ts)
         break;
 
     default:
@@ -6297,18 +7847,20 @@ void MainWindow::activationHandleResponse(quint8 cmd, const QByteArray &payload)
     switch (m_act.step) {
 
     case ActStep::Archive:
-        if (cmd == LtpCmd::FLASH_READ) {
-            // Проверяем: если всё 0xFF — Flash пуст; иначе — есть данные
-            const QByteArray data = (payload.size() > 1) ? payload.mid(1) : QByteArray();
-            bool empty = data.isEmpty();
-            if (!empty) {
-                empty = true;
-                for (char c : data) if (quint8(c) != 0xFF) { empty = false; break; }
+        if (cmd == LtpCmd::DATA_FLAG) {
+            // [0]=err, [1]=состояние флага (1=взведён, есть несохранённые данные).
+            const bool flagSet = (payload.size() >= 2 && quint8(payload.at(1)) == 1);
+            if (flagSet) {
+                // Данные не сохранены, а шаг 4 (стирание) их сотрёт → уходим в
+                // сохранение образа (startDataDump сам сбросит флаг и по успеху
+                // продолжит волну). Отказ от файла — стоп без стирания.
+                appendLog(QStringLiteral("[ACT] Шаг 1: есть несохранённые данные — сохраняю на диск…"));
+                startDataDump(true);
+                return;
             }
+            // Флаг сброшен: данные уже сохранены (или их нет) → дальше.
             activationSetSector(0, ActivationBar::SectorState::Done);
-            appendLog(empty
-                ? QStringLiteral("[ACT] Шаг 1: Flash пуст — архив не нужен")
-                : QStringLiteral("[ACT] Шаг 1: данные обнаружены (очистка на шаге 4)"));
+            appendLog(QStringLiteral("[ACT] Шаг 1: данные сохранены ранее — идём дальше"));
             activationBeginStep(ActStep::Check);
         }
         break;
@@ -6340,7 +7892,27 @@ void MainWindow::activationHandleResponse(quint8 cmd, const QByteArray &payload)
             std::memcpy(&t, d + 1, 4);
             appendLog(QStringLiteral("[ACT] Шаг 2: температура %1 °C OK")
                 .arg(double(t), 0, 'f', 1));
-            activationSetSector(1, ActivationBar::SectorState::Done);
+            activationSetSector(3, ActivationBar::SectorState::Done);   // Проверка = сегмент 3
+            activationBeginStep(ActStep::ResetWdt);
+        }
+        break;
+
+    case ActStep::ResetWdt:
+        // Шаг 3: сброс счётчиков рестартов. RESET_STATS ACK игнорируем, ждём
+        // GET_STATS с обнулёнными счётчиками (payload: см. cmdGetStats).
+        if (cmd == LtpCmd::GET_STATS) {
+            if (payload.size() < 21 || d[0] != 0) {
+                activationFail(QStringLiteral("Сброс WDT: нет ответа GET_STATS")); return;
+            }
+            quint16 rstTimer = quint16(d[17]) | (quint16(d[18]) << 8);
+            quint16 rstPower = quint16(d[19]) | (quint16(d[20]) << 8);
+            if (rstTimer != 0 || rstPower != 0) {
+                activationFail(QStringLiteral("Счётчики рестартов не обнулены (T=%1 P=%2)")
+                    .arg(rstTimer).arg(rstPower));
+                return;
+            }
+            appendLog(QStringLiteral("[ACT] Шаг 3: счётчики рестартов обнулены"));
+            activationSetSector(1, ActivationBar::SectorState::Done);   // Сброс WDT = сегмент 1
             activationBeginStep(ActStep::SyncTime);
         }
         break;
@@ -6364,9 +7936,9 @@ void MainWindow::activationHandleResponse(quint8 cmd, const QByteArray &payload)
                     .arg(diff));
                 return;
             }
-            appendLog(QStringLiteral("[ACT] Шаг 3: время синхронизировано, ΔT=%1 с")
+            appendLog(QStringLiteral("[ACT] Шаг 4: время синхронизировано, ΔT=%1 с")
                 .arg(diff));
-            activationSetSector(2, ActivationBar::SectorState::Done);
+            activationSetSector(2, ActivationBar::SectorState::Done);   // Синхро время = сегмент 2
             activationBeginStep(ActStep::Erase);
         }
         break;
@@ -6401,20 +7973,25 @@ void MainWindow::activationHandleResponse(quint8 cmd, const QByteArray &payload)
                 activationFail(QStringLiteral("Тестовая страница: расхождений %1").arg(mism));
                 return;
             }
-            appendLog(QStringLiteral("[ACT] Шаг 5: запись/чтение OK (%1 байт)")
+            appendLog(QStringLiteral("[ACT] Шаг 6: запись/чтение OK (%1 байт)")
                 .arg(data.size()));
-            activationSetSector(4, ActivationBar::SectorState::Done);
+            activationSetSector(5, ActivationBar::SectorState::Done);
             activationBeginStep(ActStep::SetReady);
         }
         break;
 
     case ActStep::SetReady:
-        if (cmd == LtpCmd::START_REGISTER) {
-            if (!payload.isEmpty() && d[0] != 0) {
-                activationFail(QStringLiteral("START_REGISTER: ошибка")); return;
+        if (cmd == LtpCmd::DATA_FLAG) {
+            // 03.08.2026: активация = ТОЛЬКО запись ts в журнал стр.121 (action 1).
+            // NOR-флаги [1]данные/[2]сохранение НЕ трогаем: после стирания (шаг
+            // Erase) данных нет, флаги чисты. Старый двухфазный «сброс флага»
+            // (action 2) УБРАН — в новой прошивке action 2 = ВЗВОД сохранения, что
+            // при активации ложно ставило байт «сохранение». Флаг «данные_есть»
+            // взведёт сама прошивка, когда прибор запишет цикл.
+            if (payload.size() < 1 || quint8(payload.at(0)) != 0) {
+                activationFail(QStringLiteral("активация: ошибка ответа устройства")); return;
             }
-            appendLog(QStringLiteral("[ACT] Шаг 6: устройство поставлено на готовность"));
-            activationSetSector(5, ActivationBar::SectorState::Done);
+            appendLog(QStringLiteral("[ACT] Шаг 7: активирован (ts установлен, данные не записаны)"));
             activationBeginStep(ActStep::Done);
         }
         break;
@@ -6422,4 +7999,145 @@ void MainWindow::activationHandleResponse(quint8 cmd, const QByteArray &payload)
     default:
         break;
     }
+}
+
+// Сохранить данные устройства на диск (образ HEX) + сбросить флаг. Общий путь
+// для кнопки «Сохранить данные» (continueWave=false) и шага 1 активации
+// (continueWave=true — по завершении волна идёт дальше). По завершении
+// обработчик TagActDump в onResponse пишет HEX и шлёт 0x30=2 (сброс флага).
+// Отказ от выбора файла: в волне — стоп без стирания; в кнопке — ничего не делаем.
+// §3.2 ПОЛИТИКА СОХРАНЕНИЯ = (активировано? по ts_activation) × (несохранённые? по флагу).
+// Вызывать при наличии несохранённых данных (m_dataFlagSet) — при входе в «Сервис»
+// и по клику сегмента 0 «Сохранить». «Между жизнями» (активирован, флаг снят) сюда
+// НЕ попадает (гейт m_dataFlagSet у вызывающего) → тишина, папка не забивается.
+//  • активирован            → спросить подтверждение [Да→в файл] / [Нет→пропустить];
+//  • НЕ активирован         → спросить: [в файл] / [отметить без файла→флаг снят] / [отмена].
+// Если данные УЖЕ сохранены (флаг [3]) — dataSaveFlow вообще не вызывается (гейт
+// m_dataFlagSet = данные И !сохранено) → в сервис без запроса. 03.08.2026.
+void MainWindow::dataSaveFlow()
+{
+    if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+    if (m_deviceActivated) {                 // активирован + не сохранено → подтверждение
+        // Раньше здесь была ПРИНУДИТЕЛЬНАЯ запись → при каждом заходе в сервис
+        // открывался диалог сохранения, плодя десяток файлов. Теперь спрашиваем.
+        if (QMessageBox::question(this, QStringLiteral("Несохранённые данные"),
+                QStringLiteral("На устройстве есть несохранённые данные. Сохранить дамп в файл?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes)
+            startDataDump(false);
+        else
+            appendLog(QStringLiteral("[Сервис] сохранение пропущено — данные на устройстве целы"));
+        return;
+    }
+    // Не активирован → выбор пользователя.
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QStringLiteral("Несохранённые данные"));
+    box.setText(QStringLiteral("Устройство не активировано, но на нём есть несохранённые данные.\n"
+                               "Что сделать?"));
+    QPushButton *toFile = box.addButton(QStringLiteral("Сохранить в файл"), QMessageBox::AcceptRole);
+    QPushButton *noFile = box.addButton(QStringLiteral("Отметить без файла"), QMessageBox::DestructiveRole);
+    box.addButton(QStringLiteral("Отмена"), QMessageBox::RejectRole);
+    box.setDefaultButton(toFile);
+    box.exec();
+    if (box.clickedButton() == toFile) {
+        startDataDump(false);
+    } else if (box.clickedButton() == noFile) {   // сброс флага без файла (DATA_FLAG=2)
+        requestCmd(LtpCmd::DATA_FLAG, QByteArray(1, char(2)), TagManual);
+        appendLog(QStringLiteral("[Сохранить] отмечено «без файла» — флаг снят, файл не создан"));
+    } else {
+        appendLog(QStringLiteral("[Сохранить] отменено — флаг не тронут"));
+    }
+}
+
+void MainWindow::startDataDump(bool continueWave)
+{
+    if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
+    // Папка по умолчанию — test_dumps в исходниках приложения (28.07.2026).
+    QString baseDir =
+#ifdef LOGLSMW_SRC_DIR
+        QStringLiteral(LOGLSMW_SRC_DIR "/test_dumps");
+#else
+        QCoreApplication::applicationDirPath() + QStringLiteral("/test_dumps");
+#endif
+    QDir().mkpath(baseDir);   // создать, если ещё нет
+    const QString def = baseDir + QStringLiteral("/dump_%1.hex")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyMMdd_HHmm")));
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Сохранить данные устройства"), def,
+        QStringLiteral("Intel HEX (*.hex)"));
+    if (path.isEmpty()) {
+        if (continueWave) {
+            appendLog(QStringLiteral("[ACT] Сохранение отменено — активация остановлена (данные целы)"));
+            activationSetSector(0, ActivationBar::SectorState::Idle);   // красный: данные не сохранены
+            activationStop();
+        } else {
+            appendLog(QStringLiteral("[Сохранить] отменено — флаг не тронут"));
+        }
+        return;
+    }
+    // Одиночное сохранение → «Сохранено» будет ЖЁЛТЫМ; в волне → ЗЕЛЁНЫМ.
+    m_saveWasWave = continueWave;
+    activationSetSector(0, ActivationBar::SectorState::Active);   // жёлтый — идёт сохранение
+    m_actDump              = ActDumpState{};
+    m_actDump.running      = true;
+    m_actDump.continueWave = continueWave;
+    m_actDump.startPage = quint16(kLogStartPage);           // журнал начинается со стр.1
+    m_actDump.page      = quint16(kLogStartPage);
+    m_actDump.pageEnd   = kFlashTotalPages;                 // 65536 (quint32!) — самотерминация по пустой (0xFF) странице
+    m_actDump.path      = path;
+    ui->lblActStatus->setText(continueWave
+        ? QStringLiteral("Шаг 1: сохранение образа…")
+        : QStringLiteral("Сохранение данных…"));
+    const quint32 addr = quint32(m_actDump.page) << 8;
+    QByteArray p;
+    for (int j = 0; j < 4; ++j) p.append(char((addr >> (8*j)) & 0xFF));
+    for (int j = 0; j < 4; ++j) p.append(char((256  >> (8*j)) & 0xFF));
+    m_dev->enqueue(LtpCmd::FLASH_READ, p, TagActDump);
+}
+
+// Запись образа в Intel HEX (симметрично loadImageFromHexFile): записи
+// 04 (extended linear address при смене старших 16 бит), 00 (данные по 16 Б),
+// 01 (EOF). Адрес = (startPage<<8)+смещение. buf — сырые байты (кратно 256).
+bool MainWindow::saveImageToHexFile(const QString &path, quint16 startPage,
+                                    const QByteArray &buf, QString &errMsg) const
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        errMsg = QStringLiteral("не удалось открыть файл на запись");
+        return false;
+    }
+    QTextStream out(&f);
+    auto emitRec = [&out](quint8 len, quint16 addr, quint8 type, const QByteArray &data) {
+        quint32 sum = quint32(len) + (addr >> 8) + (addr & 0xFF) + type;
+        QString s = QStringLiteral(":%1%2%3")
+            .arg(len,  2, 16, QLatin1Char('0'))
+            .arg(addr, 4, 16, QLatin1Char('0'))
+            .arg(type, 2, 16, QLatin1Char('0'));
+        for (char c : data) {
+            sum += quint8(c);
+            s += QStringLiteral("%1").arg(quint8(c), 2, 16, QLatin1Char('0'));
+        }
+        const quint8 cc = quint8((~sum + 1) & 0xFF);
+        s += QStringLiteral("%1").arg(cc, 2, 16, QLatin1Char('0'));
+        out << s.toUpper() << "\r\n";
+    };
+    const quint32 base = quint32(startPage) << 8;
+    quint32 curHigh = 0xFFFFFFFFu;    // заведомо не совпадёт → первый 04-рекорд выйдет
+    for (int i = 0; i < buf.size(); i += 16) {
+        const quint32 addr = base + quint32(i);
+        const quint32 high = addr & 0xFFFF0000u;
+        if (high != curHigh) {
+            curHigh = high;
+            QByteArray hd;
+            hd.append(char((high >> 24) & 0xFF));
+            hd.append(char((high >> 16) & 0xFF));
+            emitRec(2, 0, 0x04, hd);
+        }
+        const int n = qMin(16, buf.size() - i);
+        emitRec(quint8(n), quint16(addr & 0xFFFF), 0x00, buf.mid(i, n));
+    }
+    emitRec(0, 0, 0x01, QByteArray());
+    f.close();
+    errMsg.clear();
+    return true;
 }

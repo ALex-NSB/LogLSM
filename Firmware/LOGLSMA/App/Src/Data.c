@@ -20,6 +20,9 @@
 #include "math.h"
 #include "globals.h"
 #include "ltp.h"
+#include "com.h"        /* data_flag_set_if_clear() — взвод флага при записи цикла */
+#include "iflash.h"     /* iflash_journal_count(EVT_CLOCKZERO) — поколение часов */
+#include "lsm6dso_temp.h" /* LSM6DSO_GetTemp() — температура IMU в запись цикла */
 #include <string.h>
 
 /* Накопление вибрации по ОДНОМУ сэмплу accel (18.07.2026, вынесено из
@@ -135,7 +138,7 @@ uint8_t RotationDetected(RegistratorData *r)
  * (в зоне 75–340 остаток +0.1%). Ниже ~70 rpm крупный коэффициент компенсирует
  * не гироскоп, а поздний старт детекта; выше ~333 rpm гироскоп у клипа FS
  * ±2000 dps — предел измерения варианта A. */
-static const struct { float r; float k; } kSpeedCal[] = {
+static const struct { float r; float k; } kSpeedCalDefault[] = {
   {  50.0f, 1.05f  },   /* 19.07: было 1.16/1.079 — включали детект-задержку
                          * ДЛИННЫХ циклов и ПЕРЕкомпенсировали короткие
                          * (+4..8% на 51/73/77). Теперь чисто гироскопная
@@ -150,17 +153,164 @@ static const struct { float r; float k; } kSpeedCal[] = {
                          * (единственные +2% были на 276 об/мин) */
   { 330.0f, 1.022f },   /* дальше клип FS — коэффициент замораживаем */
 };
-#define SPEED_CAL_N  (sizeof(kSpeedCal)/sizeof(kSpeedCal[0]))
+#define SPEED_CAL_DEF_N  (sizeof(kSpeedCalDefault)/sizeof(kSpeedCalDefault[0]))
+
+/* РАБОЧАЯ таблица в RAM: по умолчанию = вкомпилированная, но может быть
+ * перезаписана поэкземплярной калибровкой со стр.123 (data_speedcal_load).
+ * 03.08.2026 — раньше таблица была const, правилась только пересборкой. */
+static float    s_speedR[IFLASH_SPEEDCAL_MAX];
+static float    s_speedK[IFLASH_SPEEDCAL_MAX];
+static uint16_t s_speedN = 0;
+
+static void speedcal_use_default(void)
+{
+  s_speedN = SPEED_CAL_DEF_N;
+  for (uint16_t i = 0; i < s_speedN; i++)
+  { s_speedR[i] = kSpeedCalDefault[i].r; s_speedK[i] = kSpeedCalDefault[i].k; }
+}
+
+/* Загрузить таблицу калибровки скорости из стр.123, иначе — дефолт.
+ * Вызывать на старте Service (после доступности внутр. Flash). */
+void data_speedcal_load(void)
+{
+  IflashCfg cfg;
+  if (iflash_cfg_read(&cfg) == 0 && cfg.speed_n >= 2u
+      && cfg.speed_n <= IFLASH_SPEEDCAL_MAX)
+  {
+    s_speedN = cfg.speed_n;
+    for (uint16_t i = 0; i < s_speedN; i++)
+    { s_speedR[i] = cfg.speed_r[i]; s_speedK[i] = cfg.speed_k[i]; }
+  }
+  else
+    speedcal_use_default();
+}
+
+/* Текущая таблица (для GET по LTP): копирует в r/k, возвращает число узлов. */
+uint16_t data_speedcal_get(float *r, float *k)
+{
+  if (s_speedN == 0) speedcal_use_default();
+  for (uint16_t i = 0; i < s_speedN; i++) { r[i] = s_speedR[i]; k[i] = s_speedK[i]; }
+  return s_speedN;
+}
+
+/* Инициализировать cfg дефолтом, если валидного образа на стр.123 нет.
+ * Читает существующий (сохраняя чужие поля), иначе — пустой с magic. */
+static void cfg_read_or_init(IflashCfg *cfg)
+{
+  if (iflash_cfg_read(cfg) == 0) return;
+  memset(cfg, 0, sizeof(*cfg));
+  cfg->magic = IFLASH_CFG_MAGIC;
+  cfg->version = IFLASH_CFG_VER;
+  cfg->speed_n = 0;      /* скорость — дефолт */
+  cfg->rtc_valid = 0;    /* RTC — дефолт */
+}
+
+/* Записать новую таблицу: read-modify-write (rtc-поля сохраняем) + применить. */
+int data_speedcal_set(const float *r, const float *k, uint16_t n)
+{
+  if (n < 2u || n > IFLASH_SPEEDCAL_MAX) return -1;
+  IflashCfg cfg;
+  cfg_read_or_init(&cfg);
+  cfg.speed_n = n;
+  for (uint16_t i = 0; i < n; i++) { cfg.speed_r[i] = r[i]; cfg.speed_k[i] = k[i]; }
+  if (iflash_cfg_write(&cfg) != 0) return -1;
+  data_speedcal_load();                /* перечитать → применить */
+  return 0;
+}
+
+/* ---- Калибровка часов RTC (smooth-calib) ---------------------------------- */
+#define RTC_CAL_STEP_PPM   0.95367432f     /* шаг маскирования импульса, ppm (окно 32 c) */
+#define RTC_CAL_DEFAULT_PPM (-305.2f)      /* прежний фикс CALM=320 = −305 ppm */
+
+static float s_rtcAppliedPpm = RTC_CAL_DEFAULT_PPM;
+
+/* ppm → (CALP, CALM) и применить. net_ppm = (512*CALP − CALM)*step. */
+static void rtc_apply_ppm(float ppm)
+{
+  int32_t pulses = (int32_t)(ppm / RTC_CAL_STEP_PPM + (ppm >= 0 ? 0.5f : -0.5f));
+  uint32_t calp, calm;
+  if (pulses >= 0) {                        /* ускорить */
+    if (pulses > 512) pulses = 512;
+    calp = (pulses == 0) ? RTC_SMOOTHCALIB_PLUSPULSES_RESET
+                         : RTC_SMOOTHCALIB_PLUSPULSES_SET;
+    calm = (pulses == 0) ? 0u : (uint32_t)(512 - pulses);
+  } else {                                  /* замедлить */
+    int32_t m = -pulses;
+    if (m > 511) m = 511;
+    calp = RTC_SMOOTHCALIB_PLUSPULSES_RESET;
+    calm = (uint32_t)m;
+  }
+  HAL_RTCEx_SetSmoothCalib(&hrtc, RTC_SMOOTHCALIB_PERIOD_32SEC, calp, calm);
+  s_rtcAppliedPpm = ppm;
+}
+
+void rtc_calib_apply_from_flash(void)
+{
+  IflashCfg cfg;
+  if (iflash_cfg_read(&cfg) == 0 && cfg.rtc_valid)
+    rtc_apply_ppm(cfg.rtc_ppm);
+  else
+    rtc_apply_ppm(RTC_CAL_DEFAULT_PPM);
+}
+
+float rtc_calib_get_ppm(void) { return s_rtcAppliedPpm; }
+
+int rtc_calib_set_ppm(float ppm)
+{
+  IflashCfg cfg;
+  cfg_read_or_init(&cfg);
+  cfg.rtc_ppm = ppm;
+  cfg.rtc_valid = 1u;
+  if (iflash_cfg_write(&cfg) != 0) return -1;
+  rtc_apply_ppm(ppm);
+  return 0;
+}
+
+/* ---- Паспорт устройства (стр.123) ---------------------------------------- */
+/* Прочитать паспорт. Возврат 1 = паспорт задан (поля заполнены), 0 = не задан
+ * (поля обнулены). Калибровки не затрагиваются. */
+int data_passport_get(char serial[16], uint8_t *variant,
+                      uint16_t *year, uint8_t *month, uint8_t *day)
+{
+  IflashCfg cfg;
+  if (iflash_cfg_read(&cfg) == 0 && cfg.passport_valid == 1u)
+  {
+    memcpy(serial, cfg.serial, 16);
+    serial[15] = '\0';
+    *variant = cfg.variant;
+    *year = cfg.rel_year; *month = cfg.rel_month; *day = cfg.rel_day;
+    return 1;
+  }
+  memset(serial, 0, 16);
+  *variant = 0; *year = 0; *month = 0; *day = 0;
+  return 0;
+}
+
+/* Записать паспорт: read-modify-write (калибровки скорости/RTC сохраняем). */
+int data_passport_set(const char serial[16], uint8_t variant,
+                      uint16_t year, uint8_t month, uint8_t day)
+{
+  IflashCfg cfg;
+  cfg_read_or_init(&cfg);
+  memcpy(cfg.serial, serial, 16);
+  cfg.serial[15] = '\0';
+  cfg.variant = variant;
+  cfg.rel_year = year; cfg.rel_month = month; cfg.rel_day = day;
+  cfg.passport_valid = 1u;
+  if (iflash_cfg_write(&cfg) != 0) return -1;
+  return 0;
+}
 
 static float speedCalCoef(float rpm)
 {
-  if (rpm <= kSpeedCal[0].r)              return kSpeedCal[0].k;
-  if (rpm >= kSpeedCal[SPEED_CAL_N-1].r)  return kSpeedCal[SPEED_CAL_N-1].k;
-  for (uint32_t i = 1; i < SPEED_CAL_N; i++)
-    if (rpm <= kSpeedCal[i].r)
+  if (s_speedN == 0) speedcal_use_default();
+  if (rpm <= s_speedR[0])            return s_speedK[0];
+  if (rpm >= s_speedR[s_speedN-1])   return s_speedK[s_speedN-1];
+  for (uint16_t i = 1; i < s_speedN; i++)
+    if (rpm <= s_speedR[i])
     {
-      const float x0 = kSpeedCal[i-1].r, y0 = kSpeedCal[i-1].k;
-      const float x1 = kSpeedCal[i].r,   y1 = kSpeedCal[i].k;
+      const float x0 = s_speedR[i-1], y0 = s_speedK[i-1];
+      const float x1 = s_speedR[i],   y1 = s_speedK[i];
       return y0 + (y1 - y0) * (rpm - x0) / (x1 - x0);
     }
   return 1.0f;
@@ -176,6 +326,26 @@ uint32_t HandleSensorData(RegistratorData *r)
     r->rot.maxRate = rate;
   if (RotationDetected(r))
   {
+    /* МАКСИМУМ температуры IMU за цикл (02.08.2026, идеология maxRpm/maxVibro).
+     * Опрос РЕДКИЙ: температура кристалла меняется медленно, снимать на каждом
+     * сэмпле незачем — берём раз в TEMP_SAMPLE_EVERY выборок и держим максимум. */
+    if (r->tempThrottle == 0u)
+    {
+      float tImu = 0.0f;
+      if (LSM6DSO_GetTemp(r->lsm, &tImu) == LSM6DSO_OK)
+      {
+        int16_t tc = (int16_t)lrintf(tImu);
+        if (tc > r->tempMax) r->tempMax = tc;
+        r->tempThrottle = TEMP_SAMPLE_EVERY;   /* успех → дальше прореживаем */
+      }
+      /* При СБОЕ чтения throttle НЕ взводим — повторим на следующем сэмпле.
+       * (02.08.2026: раньше взводили всегда и игнорировали результат — один
+       * сбойный I2C-опрос ронял tImu=0 → температуру всего цикла в 0, отсюда
+       * «температура только у части циклов».) */
+    }
+    else
+      r->tempThrottle--;
+
     if (r->rotWarmup)
       r->rotWarmup = 0;
     else
@@ -222,15 +392,29 @@ uint32_t HandleSensorData(RegistratorData *r)
   return HAL_OK;
 }
 
-/* Flash record write — SaveParamOnEEPROM (v2, 48 байт, БЕЗ вибрации/диагностики) */
+/* Flash record write — SaveParamOnEEPROM.
+ * ФОРМАТ СЛОВА (28.07.2026): слово = страница 256 Б, байт [0] = маркёр типа,
+ * запись(и) цикла (48 Б) с offset 1. Формат задаётся REC_FORMAT (0x31), декодер
+ * выбирает по маркёру [0] (единое маркёрное пространство с Логгером):
+ *   0xFF — пусто/конец журнала;
+ *   0xF5 — БАЗОВЫЙ: 1 запись цикла на слово ([1..48], хвост FF);
+ *   0xF3 — УПЛОТНЁННЫЙ: до 5 записей на слово ([1..48],[49..96],…[193..240],
+ *          хвост [241..255] FF) — «старая» плотная упаковка, ×5 ёмкость;
+ *   0xF4 — ПОДРОБНЫЙ (резерв): базовая запись + хвост [49..255], состав позже.
+ * «Базовый» 48-байтный формат записи НЕ меняется во всех режимах — меняется
+ * только сколько их в слове и маркёр. */
 #define LOG_START_PAGE    1u
-#define RECORDS_PER_PAGE  5u
-#define RECORD_BYTES      48u
+#define RECORD_BYTES      48u   /* базовая запись цикла (без маркёра) */
+#define COMPACT_RECS      5u    /* уплотнённый: записей на слово (5×48=240, +маркёр) */
+#define REC_MARK_BASIC    0xF5u /* маркёр слова: базовая (1 запись/слово) */
+#define REC_MARK_COMPACT  0xF3u /* маркёр слова: уплотнённая (до 5 записей/слово) */
+#define REC_MARK_EMPTY    0xFFu /* пустое слово = конец журнала */
 #define REC_VERSION       2u
 #define VARIANT_FLAG_A    0x0Au
 
 static uint32_t s_writePage = 0u;
-static uint8_t  s_writeSlot = 0u;
+static uint8_t  s_writeSlot = 0u;   /* слот внутри слова (0..4 для уплотнённого; 0 базовый) */
+static uint8_t  s_writeNewWord = 1u;/* 1 = целевое слово пустое (писать маркёр); 0 = дозапись в компакт-слово */
 
 static uint32_t rtcToSec(const RTC_DateTime *dt)
 {
@@ -295,22 +479,60 @@ void RtcSubSecFrom(const RTC_DateTime *dt, uint32_t sec, RTC_DateTime *out)
   secToRtc((s > sec) ? (s - sec) : 0U, out);
 }
 
+/* Позиция записи по маркёру слова:
+ *  0xFF пусто → начать НОВОЕ слово (маркёр по текущему формату), слот 0;
+ *  0xF5 базовое → слово занято 1 записью, дальше;
+ *  0xF3 уплотнённое → искать первый свободный слот (ts==FF) из COMPACT_RECS;
+ *       все заняты → дальше;
+ *  прочее (0xF4 и т.п.) → слово занято, дальше. */
 static void flashFindWritePos(void)
 {
-  uint8_t  buf[4];
-  uint32_t ts;
+  uint8_t mark;
   for (uint32_t page = LOG_START_PAGE; page < 65536u; page++) {
-    P25Qx_QPI_Read(&flash, page << 8u, 4u, buf);
-    memcpy(&ts, buf, 4u);
-    if (ts == 0xFFFFFFFFu) { s_writePage = page; s_writeSlot = 0u; return; }
-    for (uint8_t slot = 1u; slot < RECORDS_PER_PAGE; slot++) {
-      P25Qx_QPI_Read(&flash, (page << 8u) + slot * RECORD_BYTES, 4u, buf);
-      memcpy(&ts, buf, 4u);
-      if (ts == 0xFFFFFFFFu) { s_writePage = page; s_writeSlot = slot; return; }
+    P25Qx_QPI_Read(&flash, page << 8u, 1u, &mark);
+    if (mark == REC_MARK_EMPTY) {
+      s_writePage = page; s_writeSlot = 0u; s_writeNewWord = 1u; return;
     }
+    if (mark == REC_MARK_COMPACT) {
+      for (uint8_t slot = 0u; slot < COMPACT_RECS; slot++) {
+        uint8_t b4[4]; uint32_t ts;
+        P25Qx_QPI_Read(&flash, (page << 8u) + 1u + (uint32_t)slot * RECORD_BYTES, 4u, b4);
+        memcpy(&ts, b4, 4u);
+        if (ts == 0xFFFFFFFFu) {
+          s_writePage = page; s_writeSlot = slot; s_writeNewWord = 0u; return;
+        }
+      }
+      continue;   /* все 5 слотов заняты — следующее слово */
+    }
+    /* 0xF5 базовое (1 запись) / иной маркёр — слово занято, идём дальше */
   }
-  s_writePage = 0x10000u;
-  s_writeSlot = 0u;
+  s_writePage = 0x10000u;   /* чип заполнен */
+  s_writeSlot = 0u; s_writeNewWord = 0u;
+}
+
+/* ---- Флаговое слово в служебной стр.0 NOR (03.08.2026) ---------------------
+ * Замена рискованной внутренней Flash STM стр.122 (DATAFLAG). Каждый флаг —
+ * ОТДЕЛЬНЫЙ байт стр.0: база 0x55 (узор теста активации) / 0xFF, взведён = 0x00
+ * (добит program-ом бит 1→0 БЕЗ стирания — безопасно на батарее: ни erase, ни
+ * ECC). Все флаги SET-ONLY; сброс — только стиранием данных (стр.0 в одном 4КБ-
+ * секторе с данными, LOG_START_PAGE=1): 0x2A перезаписывает стр.0 базой, полное
+ * стирание чипа гасит всё. Номера по смыслу (в Data.h). Активация ДУБЛИРУЕТСЯ в
+ * стр.121 (журнал ts) — там история/калибровка; здесь [1] — быстрый булев. */
+
+/* 1 = флаг взведён (байт == 0x00), 0 = нет. idx = смещение байта в стр.0. */
+int data_norflag_get(uint8_t idx)
+{
+  uint8_t b = 0xFFu;
+  P25Qx_QPI_Read(&flash, (uint32_t)idx, 1u, &b);
+  return (b == 0x00u) ? 1 : 0;
+}
+
+/* Взвести флаг: добить байт idx → 0x00 (один program, без стирания). Идемпотентно
+ * (0x00 поверх 0x00 — no-op для NOR). Вызывать только когда флаг реально нужен. */
+void data_norflag_set(uint8_t idx)
+{
+  uint8_t b = 0x00u;
+  P25Qx_QPI_ProgramPage(&flash, (uint32_t)idx, &b, 1u);
 }
 
 uint32_t SaveParamOnEEPROM(RegistratorData *r)
@@ -319,8 +541,10 @@ uint32_t SaveParamOnEEPROM(RegistratorData *r)
   if (s_writePage >= 0x10000u)
     return HAL_ERROR;
 
+  /* Строим базовую 48-байтную запись отдельно; как она ляжет в слово — решает
+   * ветка записи ниже (новое слово с маркёром / дозапись в уплотнённый слот). */
   uint8_t rec[RECORD_BYTES];
-  memset(rec, 0, sizeof(rec));
+  memset(rec, 0, RECORD_BYTES);
 
   uint32_t tsStart       = rtcToSec(&r->rot.startTimeStamp);
   uint32_t duration      = RTC_SubTimeDateSec(&r->rot.stopTimeStamp,
@@ -346,15 +570,48 @@ uint32_t SaveParamOnEEPROM(RegistratorData *r)
   memcpy(rec + 24, &vib1_rms,      4u);
   memcpy(rec + 28, &vib2_peak,     4u);
   memcpy(rec + 32, &vib2_rms,      4u);
-  /* rec[36] temperature, rec[37] status = 0 (memset, не в этом шаге) */
+  /* rec[36] = МАКСИМУМ температуры IMU LSM за цикл (02.08.2026, идеология
+   * maxRpm/maxVibro). Кодирование: байт = °C + 60 (uint8 → −60..+195 °C, с
+   * запасом под предел датчика ~+150). Максимум копится в HandleSensorData
+   * редким опросом (TEMP_SAMPLE_EVERY). Если цикл был так короток, что ни разу
+   * не сняли (tempMax == INT16_MIN) — берём одиночный отсчёт как фолбэк. LSM уже
+   * включён. Декодер LOGLSMW читает rec[36]-60. rec[37] status = 0. */
+  {
+    int32_t tC;
+    if (r->tempMax != INT16_MIN) {
+      tC = r->tempMax;                 /* максимум за цикл (штатный путь) */
+    } else {
+      /* Ни одного удачного отсчёта за цикл (очень короткий цикл) — одиночный
+       * фолбэк с проверкой результата; при сбое пишем sentinel −60 (rec[36]=0),
+       * декодер покажет как «нет температуры», а не мусор. */
+      float tImu = 0.0f;
+      tC = (LSM6DSO_GetTemp(&lsm, &tImu) == LSM6DSO_OK) ? (int32_t)lrintf(tImu) : -60;
+    }
+    int32_t tRaw = tC + 60;
+    if (tRaw < 0)        tRaw = 0;
+    else if (tRaw > 255) tRaw = 255;
+    rec[36] = (uint8_t)tRaw;
+  }
   rec[38] = REC_VERSION;      /* = 2 */
   rec[39] = VARIANT_FLAG_A;   /* = 0x0A */
 
-  /* reserved[40..45] = 0 (memset), по спеке v2. Диагностика убрана 18.07 вечер:
+  /* ПОКОЛЕНИЕ ЧАСОВ (02.08.2026) — u16 в rec[40..41], бывшие reserved.
+   * = число событий обнуления часов (EVT_CLOCKZERO) в журнале внутренней Flash.
+   * Все записи одной эпохи несут одинаковый номер; после полевого разрыва
+   * питания часы падают к нулю И номер +1 → при последовательном чтении смена
+   * этого номера = ТОЧКА СТЫКА (время рестартовало). Размер записи (48 Б),
+   * маркёр слова и последовательность вывода НЕ меняются; CRC ниже (46 Б) уже
+   * покрывает эти байты. Старые записи (reserved=0) читаются как эпоха 0 —
+   * совместимо. См. clock_epoch_seam_spec_v1.md. */
+  uint16_t clockEpoch = iflash_journal_count(EVT_CLOCKZERO);
+  memcpy(rec + 40, &clockEpoch, 2u);
+
+  /* reserved[42..45] = 0 (memset), по спеке v2. Диагностика убрана 18.07 вечер:
    * подтверждено vibCount≈31/с, пик в мг сходится, шкала ±2g, state=ROTATING —
    * «нулевой» прогон был артефактом промежуточной прошивки 15:08. */
 
-  /* rec[40..45] reserved = 0 (memset) — по спеке v2. Диагностика 0xBEEF/vibCount/
+  /* rec[42..45] reserved = 0 (memset) — по спеке v2 (rec[40..41] = поколение
+   * часов, см. выше). Диагностика 0xBEEF/vibCount/
    * len убрана 17.07 11:14: вибрация подтверждена на железе (vib1/vib2 ненулевые,
    * vibCount~105-108, len=6, 0xBEEF доезжал → свежий Data.c исполняется).
    * Свежесть прошивки теперь проверяется индикатором версии (com.c) + надёжной
@@ -362,11 +619,35 @@ uint32_t SaveParamOnEEPROM(RegistratorData *r)
   uint16_t crc = ltp_crc16(rec, 46u);
   memcpy(rec + 46, &crc, 2u);
 
-  if (s_writeSlot == 0u)
-    P25Qx_QPI_ErasePage(&flash, s_writePage << 8u);
+  /* ⚠ 28.07.2026: erase страницы УБРАН из рабочего пути записи цикла.
+   * Идеология (data_format_spec_v1.md §«Общая архитектура»): стирание — ТОЛЬКО
+   * в сервисе (полное стирание чипа = проверяемое условие активации). В работе
+   * на батарейке пишем только program в уже-FF ячейки; при заполнении журнала
+   * запись прекращается, поверх не пишем. Erase здесь нарушал правило и создавал
+   * окно порчи при обрыве питания (батарейка в зажиме + вибрация). Страница уже
+   * чиста после сервисного стирания перед выездом — program достаточно. */
+  if (s_writeNewWord) {
+    /* НОВОЕ слово: маркёр текущего формата [0] + запись в слот 0 ([1..48]),
+     * один program 49 байт. Базовый → 1 запись/слово; уплотнённый → это первая
+     * из пяти, остальные допишутся в след. циклы веткой else. */
+    uint8_t word[1u + RECORD_BYTES];
+    word[0] = rec_format_marker();
+    memcpy(word + 1u, rec, RECORD_BYTES);
+    P25Qx_QPI_ProgramPage(&flash, s_writePage << 8u, word, 1u + RECORD_BYTES);
+  } else {
+    /* ДОЗАПИСЬ в уплотнённое слово: маркёр [0]=0xF3 уже стоит, пишем только
+     * запись в свой слот ([1 + slot*48 ..]). */
+    uint32_t addr = (s_writePage << 8u) + 1u + (uint32_t)s_writeSlot * RECORD_BYTES;
+    P25Qx_QPI_ProgramPage(&flash, addr, rec, RECORD_BYTES);
+  }
 
-  uint32_t addr = (s_writePage << 8u) + s_writeSlot * RECORD_BYTES;
-  P25Qx_QPI_ProgramPage(&flash, addr, rec, RECORD_BYTES);
+  /* Данные появились → взвести флаг «данные_есть» ([1]) в служебной стр.0 NOR.
+   * Один program байта 0x55/0xFF→0x00 без стирания — безопасно на батарее.
+   * Проверено на железе (дамп: байт [1]=0x00 после цикла) — путь записи НЕ виснет.
+   * (Зависание было при ЧТЕНИИ после сна: обесточенный флеш → вечный Wait_Busy;
+   * лечится таймаутом Wait_Busy, см. p25q128.c 14:55.) Идемпотентно. */
+  if (!data_norflag_get(NOR_FLAG_DATA))
+    data_norflag_set(NOR_FLAG_DATA);
   return HAL_OK;
 }
 
@@ -408,24 +689,26 @@ uint32_t SaveTotalSec(RegistratorData *r)
 uint32_t LoadTotalSec(RegistratorData *r)
 {
   flashFindWritePos();
-  if (s_writePage == LOG_START_PAGE && s_writeSlot == 0u) {
+  if (s_writePage == LOG_START_PAGE && s_writeNewWord) {   /* ничего не записано */
     r->totalSec = 0u;
     return HAL_OK;
   }
-  uint32_t lastPage;
-  uint8_t  lastSlot;
-  if (s_writePage >= 0x10000u) {
-    lastPage = 65535u;
-    lastSlot = (uint8_t)(RECORDS_PER_PAGE - 1u);
-  } else if (s_writeSlot == 0u) {
-    lastPage = s_writePage - 1u;
-    lastSlot = (uint8_t)(RECORDS_PER_PAGE - 1u);
-  } else {
+  /* Последняя запись:
+   *  - дозаполняем уплотнённое слово (slot>0) → предыдущий слот этого же слова;
+   *  - иначе (новое пустое слово / чип полон) → предыдущее ПОЛНОСТЬЮ занятое
+   *    слово; его последний слот по маркёру (уплотнённое → COMPACT_RECS-1). */
+  uint32_t lastPage; uint8_t lastSlot;
+  if (!s_writeNewWord && s_writeSlot > 0u) {
     lastPage = s_writePage;
     lastSlot = s_writeSlot - 1u;
+  } else {
+    lastPage = (s_writePage >= 0x10000u) ? 65535u : (s_writePage - 1u);
+    uint8_t m;
+    P25Qx_QPI_Read(&flash, lastPage << 8u, 1u, &m);
+    lastSlot = (m == REC_MARK_COMPACT) ? (uint8_t)(COMPACT_RECS - 1u) : 0u;
   }
   uint8_t  rec[RECORD_BYTES];
-  uint32_t addr = (lastPage << 8u) + (uint32_t)lastSlot * RECORD_BYTES;
+  uint32_t addr = (lastPage << 8u) + 1u + (uint32_t)lastSlot * RECORD_BYTES;
   P25Qx_QPI_Read(&flash, addr, RECORD_BYTES, rec);
   uint16_t stored_crc;
   memcpy(&stored_crc, rec + 46u, 2u);

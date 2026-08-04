@@ -21,7 +21,11 @@
 #include "rtc.h"
 
 /* USER CODE BEGIN 0 */
-
+/* Флаг «часы обнулились на этом boot» (маркёр 0xBEBE отсутствовал). Ставится
+ * ниже в ветке обнуления, читается в main.c::ServiceStorageBootLog() → там
+ * пишется событие EVT_CLOCKZERO в журнал внутренней Flash (счётчик «поколения
+ * часов»). Определён в main.c рядом с g_wakeCause. (02.08.2026) */
+extern volatile uint8_t g_clockZeroed;
 /* USER CODE END 0 */
 
 RTC_HandleTypeDef hrtc;
@@ -57,13 +61,14 @@ void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
-  /* RTC SMOOTH-CALIBRATION (19.07.2026, по ночному тесту дрейфа 18–19.07):
-   * в ПОКОЕ часы спешат на +8 c за 7 ч 18 м ≈ +305 ppm (кварц LSE/обвязка,
-   * норма ±20–30). Замедляем маскированием импульсов: CALM = 305/0.954 ≈ 320
-   * (окно 32 c). Ставим на КАЖДОМ boot, ДО проверки маркера — применяется и
-   * при живых часах. Уточнение члена — повторным ночным тестом. */
-  HAL_RTCEx_SetSmoothCalib(&hrtc, RTC_SMOOTHCALIB_PERIOD_32SEC,
-                           RTC_SMOOTHCALIB_PLUSPULSES_RESET, 320);
+  /* RTC SMOOTH-CALIBRATION. Базовый член (19.07.2026): в ПОКОЕ часы спешат
+   * ≈ +305 ppm → замедляем (CALM=320, окно 32 c). 03.08.2026: значение больше
+   * НЕ жёсткое — берётся из стр.123 (поэкземплярная поправка, «Калибровка» →
+   * Часы RTC), дефолт = те же −305 ppm если пользователь не задал. Применяем на
+   * КАЖДОМ boot, ДО проверки маркера (и при живых часах). После потери VBAT
+   * RTC_CALR обнуляется — поэтому переприменяем из внутр. Flash здесь. */
+  extern void rtc_calib_apply_from_flash(void);   /* Data.c */
+  rtc_calib_apply_from_flash();
   /* Достоверность часов (17.07.2026). Backup-домен (RTC_BKP_DR0) гаснет ТОЛЬКО
    * с питанием. Маркер на месте → питание НЕ терялось (перешивка/watchdog/Stop2-
    * ресет), часы достоверны — НЕ сбрасываем, выходим. Маркера нет → питание
@@ -99,6 +104,11 @@ void MX_RTC_Init(void)
    * Помечаем backup-домен живым — на СЛЕДУЮЩИХ сбросах без потери питания
    * часы сохранятся (проверка в Check_RTC_BKUP выше). (17.07.2026) */
   HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, 0xBEBE0001u);
+  /* Взводим флаг «часы обнулились» — ServiceStorageBootLog() ниже по main.c
+   * запишет EVT_CLOCKZERO в журнал iflash (поколение часов +1). Пишем не
+   * здесь: журнал внутренней Flash на этом раннем этапе ещё не гарантирован
+   * к записи (iflash_journal_ensure_ready вызывается позже). (02.08.2026) */
+  g_clockZeroed = 1u;
   /* USER CODE END RTC_Init 2 */
 
 }

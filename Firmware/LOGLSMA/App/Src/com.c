@@ -4,6 +4,7 @@
 #include "globals.h"
 #include "main.h"
 #include "iflash.h"      /* журнал событий внутренней Flash (счётчики рестартов) */
+#include "Data.h"        /* NOR-флаги стр.0 (data_norflag_*), калибровки */
 
 /* FlashQ.h исключён: дублирует union StatusRegBits из p25q128.h */
 void FlashOn(void);
@@ -48,6 +49,20 @@ void cmdFlashReadIDHandler(LtpPacket *wc);            //C0 8D 04 00 00
 void cmdFlashChipEraseHandler(LtpPacket *wc);
 void cmdFlashDataEraseHandler(LtpPacket *wc);         /* 0x2A — «Стереть данные»: чип БЕЗ служебной стр.0 */
 void FlashDataEraseTick(void);                        /* дозавершение 0x2A — дёргать из Service() */
+void cmdFlashSetSpiModeHandler(LtpPacket *wc);        /* 0x2B — режим SPI (0=SPI, 1=SPIx4), только Сервис */
+void cmdFlashSetFreqHandler(LtpPacket *wc);          /* 0x2C — частота флеша: делитель от 80 МГц (0..4=80/40/20/10/5), только Сервис */
+void cmdFlashSpeedTestHandler(LtpPacket *wc);        /* 0x2D — замер скорости записи/чтения области, только Сервис */
+void cmdDataFlagHandler(LtpPacket *wc);              /* 0x30 — флаг «есть непрочитанные данные» (внутр. Flash стр.122) */
+void cmdRecFormatHandler(LtpPacket *wc);            /* 0x31 — формат записи цикла (маркёр слова): 0 базовый/1 уплотн/2 подроб */
+void cmdClearJournals(LtpPacket *wc);              /* 0x27 — «Очистить журналы»: стереть стр.121 (активации) + 124..127 (рестарты), Сервис */
+void activation_cache_init(void);                  /* старт Service: журнал активаций стр.121 → кэш s_actts (один раз) */
+void cmdActHistory(LtpPacket *wc);                 /* 0x2E — история активаций: список ts со стр.121, Сервис */
+void cmdSpeedCalGet(LtpPacket *wc);                /* 0x2F — таблица калибровки скорости (стр.123) → ПК, Сервис */
+void cmdSpeedCalSet(LtpPacket *wc);                /* 0x32 — записать таблицу калибровки скорости на стр.123, Сервис */
+void cmdRtcCalibGet(LtpPacket *wc);                /* 0x33 — чтение поправки RTC ppm, Сервис */
+void cmdRtcCalibSet(LtpPacket *wc);                /* 0x34 — запись поправки RTC ppm на стр.123, Сервис */
+void cmdPassportGet(LtpPacket *wc);                /* 0x35 — чтение паспорта (стр.123) → ПК, Сервис */
+void cmdPassportSet(LtpPacket *wc);                /* 0x36 — запись паспорта на стр.123, Сервис */
 void cmdFlashPageEraseHandler(LtpPacket *wc);
 void cmdFlashSectorEraseHandler(LtpPacket *wc);       /* 0x1F */
 void cmdFlashWritePageHandler(LtpPacket *wc);         //C0 8D 05 00 00 00 00 00
@@ -130,10 +145,23 @@ static cmd_callback_t CMD[128] = {
     cmdResetStats,                              /* 0x24  сброс счётчиков перезапусков (журнал iflash) */
     NULL,                                       /* 0x25  WDG_KICK — только исходящий */
     cmdWdgTest,                                 /* 0x26  тест IWDG: отключить рефреш → сброс через ~32 c */
-    /* 0x27, 0x28 — зарезервированы под паспорт/флаг активации (см. session_notes
-     * 18.07.2026, §11) — ещё не реализованы, оставлены NULL.
+    cmdClearJournals,                           /* 0x27  «Очистить журналы»: стереть стр.121 (активации) + 124..127 (рестарты), стр.123 цела — Сервис (03.08.2026) */
+    /* 0x28 — зарезервирован под паспорт/заводскую команду (см. session_notes
+     * 18.07.2026, §11) — ещё не реализован, оставлен NULL.
      * 0x29 — SUBSPEED_PUSH, только исходящий (как CYCLE_PUSH 0x20), NULL. */
-    [0x2A] = cmdFlashDataEraseHandler           /* 0x2A  «Стереть данные» — чип БЕЗ служебной стр.0 (21.07.2026) */
+    [0x2A] = cmdFlashDataEraseHandler,          /* 0x2A  «Стереть данные» — чип БЕЗ служебной стр.0 (21.07.2026) */
+    [0x2B] = cmdFlashSetSpiModeHandler,         /* 0x2B  режим SPI: 0=SPI(x1), 1=SPIx4 — только Сервис (22.07.2026) */
+    [0x2C] = cmdFlashSetFreqHandler,            /* 0x2C  частота флеша (делитель от 80 МГц) — только Сервис (26.07.2026) */
+    [0x2D] = cmdFlashSpeedTestHandler,          /* 0x2D  замер скорости записи/чтения — только Сервис (26.07.2026) */
+    [0x2E] = cmdActHistory,                      /* 0x2E  история активаций: список ts со стр.121 — Сервис (03.08.2026) */
+    [0x2F] = cmdSpeedCalGet,                      /* 0x2F  калибровка скорости: чтение таблицы (стр.123) — Сервис (03.08.2026) */
+    [0x32] = cmdSpeedCalSet,                      /* 0x32  калибровка скорости: запись таблицы (стр.123) — Сервис (03.08.2026) */
+    [0x33] = cmdRtcCalibGet,                      /* 0x33  калибровка RTC: чтение ppm — Сервис (03.08.2026) */
+    [0x34] = cmdRtcCalibSet,                      /* 0x34  калибровка RTC: запись ppm (стр.123) — Сервис (03.08.2026) */
+    [0x30] = cmdDataFlagHandler,                /* 0x30  флаг «непрочитанные данные» (внутр. Flash стр.122) — Сервис */
+    [0x31] = cmdRecFormatHandler,               /* 0x31  формат записи цикла (маркёр слова) — Сервис */
+    [0x35] = cmdPassportGet,                     /* 0x35  паспорт: чтение (стр.123) — Сервис (03.08.2026) */
+    [0x36] = cmdPassportSet                      /* 0x36  паспорт: запись (стр.123) — Сервис (03.08.2026) */
 };
   
 static LtpParser ltp_rx;          /* FSM-парсер входного потока */
@@ -327,6 +355,7 @@ uint8_t RotationStateStep(RegistratorData *r)
       r->vibLvl = 0; r->vibLvlInit = 0;    /* «уровень» — median-трекер */
       r->plateauInit = 0; r->subCount = 0; r->plateauChg = 0;  /* детектор полок */
       r->jerkPeak = 0; r->jerkSumSq = 0; r->prevAmagInit = 0;  /* канал 2 (jerk) */
+      r->tempMax = INT16_MIN; r->tempThrottle = 0;   /* макс. температура за цикл */
       r->noDetectCount = 0;
       r->idleChecks = 0;  /* активность подтверждена — счётчик покоя обнуляем */
       r->deepSleep  = 0;  /* остаёмся в «Проверке» (RTC), не в глубоком сне */
@@ -428,6 +457,12 @@ void Service(RegistratorData *r)
    * Флаг s_flash_on общий с cmdFlashOn() — повторный вызов при переподключении
    * к уже инициализированной в QPI Flash → QUADSPI таймаут 5-16 с. */
   if (!s_flash_on) { flashActiv(); s_flash_on = 1; }
+
+  /* Кэш активации: журнал стр.121 читаем ОДИН раз здесь (внешнее питание есть),
+   * дальше GET_STATS отдаёт ts_activation из кэша s_actts — горячего чтения
+   * внутренней Flash нет (именно это роняло прибор в старой версии). 03.08.2026. */
+  activation_cache_init();
+  data_speedcal_load();   /* таблица калибровки скорости стр.123 → RAM (дефолт если нет) */
 
   /* Внутренний термодатчик STM32 — ВРЕМЕННО ОТКЛЮЧЁН (12.06):
    * calc_vref()/ADC1_Temp_Channel_Init() вешали контроллер до входа в SERVICE
@@ -628,10 +663,10 @@ void cmdPing(LtpPacket *wc)
  * Прошил → увидел эти числа в «Данные» → значит в контроллере именно эта
  * правка. Не совпало — прошит старый ELF (пересобери и прошей заново). */
 #define FW_YY  26   /* год  */
-#define FW_MM   7   /* мес  */
-#define FW_DD  19   /* число*/
-#define FW_HH  18   /* часы */
-#define FW_MI  58   /* мин  */
+#define FW_MM   8   /* мес  */
+#define FW_DD   3   /* число*/
+#define FW_HH  22   /* часы */
+#define FW_MI  25   /* мин  — активация АВТО-ЗАКРЫВАЕТ предыдущую незакрытую жизнь (END перед новым START) — незакрытых «(идёт)» в середине истории быть не должно; паспорт 0x35/0x36, 03.08.2026 */
 
 /* ИМЯ УСТРОЙСТВА — хранится в КОНТРОЛЛЕРЕ (паспорт; позже перенесём во
  * внутреннюю Flash STM32 как настраиваемый серийник/вариант). LOGLSMW просто
@@ -843,6 +878,140 @@ void cmdResetStats(LtpPacket *wc)
   iflash_journal_reset();
   uint8_t err = er_none;
   sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
+}
+
+static uint32_t s_actts;   /* форвард (кэш активации; определение ниже) */
+
+/* 0x27 — «ОЧИСТИТЬ ЖУРНАЛЫ» — ТОЛЬКО очистка ЗАПИСЕЙ журналов, к СОСТОЯНИЮ прибора
+ * отношения НЕ имеет (03.08.2026, по уточнению пользователя). Стирает журнал
+ * активаций (стр.121, история «жизней») + журнал рестартов (стр.124..127,
+ * счётчики). НЕ трогает: NOR-флаги стр.0 (они и есть признак состояния —
+ * активирован/данные/сохранение), заводскую стр.123, кэш состояния. Флаг и
+ * журнал НЕ связаны: журнал = записи истории, флаг = текущее состояние.
+ * Отличие от 0x24 «Сброс WDT» (только счётчики рестартов). */
+void cmdClearJournals(LtpPacket *wc)
+{
+  iflash_journals_clear_all();   /* стр.121 + 124..127, стр.123 и NOR-флаги нетронуты */
+  /* s_actts (кэш состояния) НЕ трогаем — состояние ведёт NOR-флаг стр.0, не журнал. */
+  uint8_t err = er_none;
+  sendPacket(wc->addr, wc->cmd, &err, sizeof(err));
+}
+
+/* 0x2F — GET калибровки скорости: таблица узлов со стр.123 (или дефолт).
+ * payload ответа: err(1) | n u8 | n×[ r float(LE) | k float(LE) ]. 03.08.2026. */
+void cmdSpeedCalGet(LtpPacket *wc)
+{
+  float r[IFLASH_SPEEDCAL_MAX], k[IFLASH_SPEEDCAL_MAX];
+  uint16_t n = data_speedcal_get(r, k);
+  uint8_t ans[2 + IFLASH_SPEEDCAL_MAX * 8];
+  ans[0] = er_none;
+  ans[1] = (uint8_t)n;
+  for (uint16_t i = 0; i < n; i++)
+  {
+    memcpy(&ans[2 + i*8],     &r[i], 4);
+    memcpy(&ans[2 + i*8 + 4], &k[i], 4);
+  }
+  sendPacket(wc->addr, wc->cmd, ans, (uint16_t)(2 + n*8));
+}
+
+/* 0x32 — SET калибровки скорости: записать таблицу на стр.123 + применить.
+ * payload запроса: n u8 | n×[ r float(LE) | k float(LE) ]. Ответ: err(1). */
+void cmdSpeedCalSet(LtpPacket *wc)
+{
+  uint8_t err = er_none;
+  if (wc->n < 1) { err = er_badarg; sendPacket(wc->addr, wc->cmd, &err, 1); return; }
+  uint16_t n = wc->data[0];
+  if (n < 2 || n > IFLASH_SPEEDCAL_MAX || wc->n < (uint16_t)(1 + n*8))
+  { err = er_badarg; sendPacket(wc->addr, wc->cmd, &err, 1); return; }
+  float r[IFLASH_SPEEDCAL_MAX], k[IFLASH_SPEEDCAL_MAX];
+  for (uint16_t i = 0; i < n; i++)
+  {
+    memcpy(&r[i], &wc->data[1 + i*8],     4);
+    memcpy(&k[i], &wc->data[1 + i*8 + 4], 4);
+  }
+  if (data_speedcal_set(r, k, n) != 0) err = er_not_impl;   /* стирание/запись стр.123 не удалась */
+  sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* 0x33 — GET калибровки RTC: текущая применённая поправка ppm (float).
+ * payload ответа: err(1) | ppm float(LE). 03.08.2026. */
+void cmdRtcCalibGet(LtpPacket *wc)
+{
+  float ppm = rtc_calib_get_ppm();
+  uint8_t ans[5];
+  ans[0] = er_none;
+  memcpy(&ans[1], &ppm, 4);
+  sendPacket(wc->addr, wc->cmd, ans, 5);
+}
+
+/* 0x34 — SET калибровки RTC: сохранить ppm на стр.123 + применить сразу.
+ * payload запроса: ppm float(LE). Ответ: err(1). */
+void cmdRtcCalibSet(LtpPacket *wc)
+{
+  uint8_t err = er_none;
+  if (wc->n < 4) { err = er_badarg; sendPacket(wc->addr, wc->cmd, &err, 1); return; }
+  float ppm; memcpy(&ppm, wc->data, 4);
+  if (rtc_calib_set_ppm(ppm) != 0) err = er_not_impl;
+  sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* 0x35 — GET паспорта: серийник/вариант/дата выпуска со стр.123 (03.08.2026).
+ * Ответ: err(1) | valid u8 | serial[16] | variant u8 | year u16(LE) | month u8 | day u8.
+ * valid=0 → паспорт не задан (поля обнулены). */
+void cmdPassportGet(LtpPacket *wc)
+{
+  char serial[16]; uint8_t variant, month, day; uint16_t year;
+  int valid = data_passport_get(serial, &variant, &year, &month, &day);
+  uint8_t ans[1 + 1 + 16 + 1 + 2 + 1 + 1];
+  ans[0] = er_none;
+  ans[1] = (uint8_t)(valid ? 1 : 0);
+  memcpy(&ans[2], serial, 16);
+  ans[18] = variant;
+  memcpy(&ans[19], &year, 2);
+  ans[21] = month;
+  ans[22] = day;
+  sendPacket(wc->addr, wc->cmd, ans, sizeof(ans));
+}
+
+/* 0x36 — SET паспорта: записать серийник/вариант/дату на стр.123 (03.08.2026).
+ * Запрос: serial[16] | variant u8 | year u16(LE) | month u8 | day u8 = 21 байт.
+ * Калибровки в той же странице сохраняются (read-modify-write). Ответ: err(1). */
+void cmdPassportSet(LtpPacket *wc)
+{
+  uint8_t err = er_none;
+  if (wc->n < 21) { err = er_badarg; sendPacket(wc->addr, wc->cmd, &err, 1); return; }
+  char serial[16];
+  memcpy(serial, &wc->data[0], 16);
+  serial[15] = '\0';
+  uint8_t variant = wc->data[16];
+  uint16_t year; memcpy(&year, &wc->data[17], 2);
+  uint8_t month = wc->data[19];
+  uint8_t day   = wc->data[20];
+  if (data_passport_set(serial, variant, year, month, day) != 0) err = er_not_impl;
+  sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* 0x2E — ИСТОРИЯ АКТИВАЦИЙ: события «жизней» со стр.121 (03.08.2026).
+ * payload ответа: err(1) | count u16(LE) | count×[ type u8 | ts u32(LE) | restarts u16(LE) ].
+ * type = EVT_ACTIVATION(0xF3) начало / EVT_ACT_END(0xF4) конец; restarts = общий
+ * счётчик перезапусков на момент события (разница конец−начало = за «жизнь»).
+ * W разбивает на строки начало→конец. Ограничение — 36 событий (7 Б каждое). */
+void cmdActHistory(LtpPacket *wc)
+{
+  uint8_t  types[36];
+  uint32_t ts[36];
+  uint16_t rst[36];
+  uint16_t n = iflash_activation_events(types, ts, rst, 36);
+  uint8_t ans[3 + 36 * 7];
+  ans[0] = er_none;
+  memcpy(&ans[1], &n, 2);
+  for (uint16_t i = 0; i < n; i++)
+  {
+    ans[3 + i * 7]     = types[i];
+    memcpy(&ans[3 + i * 7 + 1], &ts[i],  4);
+    memcpy(&ans[3 + i * 7 + 5], &rst[i], 2);
+  }
+  sendPacket(wc->addr, wc->cmd, ans, (uint16_t)(3 + n * 7));
 }
 
 /* 0x26 — ТЕСТ IWDG (18.07.2026): отключаем рефреш сторожа (g_iwdg_on=0) →
@@ -1105,6 +1274,39 @@ void cmdGetAcquisitionData(LtpPacket *wc)
   sendPacket(wc->addr, wc->cmd, &data, sizeof(data));
 }*/
 
+/* ts_activation — метка времени активации.
+ * 03.08.2026: ПЕРСИСТЕНТНА снова, но БЕЗОПАСНО — журнал активаций во внутр.
+ * Flash стр.121 (iflash_activation_*), append-only. История прошлой попытки:
+ * старая метка на стр.121 ЧИТАЛАСЬ в GET_STATS при КАЖДОМ опросе (~5 с); если
+ * запись прерывалась питанием (батарейка+вибрация) → битый ECC → NMI/hardfault
+ * на каждом GET_STATS, и перепрошивка НЕ лечила (стр.121 не стиралась). Поэтому
+ * метку убирали в ОЗУ. ТЕПЕРЬ безопасно: (1) стр.121 читается ОДИН раз на старте
+ * Service в кэш s_actts, GET_STATS отдаёт из кэша (горячего чтения Flash нет);
+ * (2) пишем ТОЛЬКО append одного слова и ТОЛЬКО под кабелем в Сервисе (питание
+ * стабильно, прерывание записи исключено); (3) «Очистить журналы» слепо стирает
+ * стр.121 и лечит любой легаси-битый ECC. Деактивации как операции НЕТ (§2.4):
+ * журнал накапливает только активации, «не активирован» = стёртая стр.121.
+ * 0xFFFFFFFF = не активировано. Кэш инициализируется в activation_cache_init(). */
+static uint32_t s_actts = 0xFFFFFFFFu;
+
+static uint32_t actts_read(void)  { return s_actts; }
+/* Активация (начало жизни): дописать ts в журнал (persist) + кэш. Под кабелем. */
+static void     actts_write(uint32_t ts) { iflash_activation_append(ts); s_actts = ts; }
+/* Конец жизни (сохранение/снятие с активации): дописать END + закрыть кэш. */
+static void     actts_end(uint32_t ts)   { iflash_activation_end(ts);    s_actts = 0xFFFFFFFFu; }
+
+/* Инициализация кэша активации на старте Service (внешнее питание): один раз
+ * прочитать журнал стр.121 → s_actts. ensure_ready лечит мусорную страницу. */
+void activation_cache_init(void)
+{
+  iflash_activation_ensure_ready();
+  /* Текущее состояние активации = NOR-байт [1] стр.0 (ОСНОВНОЙ признак). ts берём
+   * из журнала стр.121 только когда байт взведён; иначе «не активирован». Так
+   * состояние не расходится с байтом после стирания данных. 03.08.2026. */
+  s_actts = data_norflag_get(NOR_FLAG_ACTIVATED)
+              ? iflash_activation_last() : 0xFFFFFFFFu;
+}
+
 /* 0x1E — GET_STATS
  * payload (23 байта): cod(1) | total_sec u32 | ts_first u32 | ts_last u32
  *                   | ts_activation u32 | restarts_timer u16 | restarts_power u16
@@ -1131,7 +1333,7 @@ void cmdGetStats(LtpPacket *wc)
   val32 = 0xFFFFFFFFu;                        /* ts_last  — нет данных */
   memcpy(&ans[9], &val32, 4);
 
-  val32 = 0xFFFFFFFFu;                        /* ts_activation — не активировано */
+  val32 = actts_read();                       /* ts_activation из КЭША s_actts (журнал стр.121 прочитан на старте Service — БЕЗ горячего чтения Flash) */
   memcpy(&ans[13], &val32, 4);
 
   /* Реальные счётчики рестартов из журнала внутренней Flash (06.07.2026,
@@ -1307,6 +1509,8 @@ void cmdFlashChipEraseHandler(LtpPacket *wc)
   if (s_reg)
     s_reg->totalSec = 0u;
 
+  data_flag_clear();   /* нет данных → флаг «несохранённые» сброшен (зелёный) */
+
   sendPacket(wc->addr, wc->cmd, &f, 1);
 }
 
@@ -1331,6 +1535,14 @@ void cmdFlashDataEraseHandler(LtpPacket *wc)
   uint8_t f = er_none;
 
   P25Qx_QPI_Read(&flash, 0, P25Q_PAGE_SIZE, s_page0Backup);
+  /* Стёрли данные = новая «жизнь»: сбросить ВСЕ NOR-флаги стр.0 [1]активирован /
+   * [2]данные / [3]сохранение (в восстанавливаемой стр.0 пишем базу 0xFF). Текущее
+   * состояние = «не активирован» до повторной активации; ts-история в стр.121
+   * сохраняется (отдельная память, чистится «Очистить журналы» 0x27). 03.08.2026. */
+  s_page0Backup[NOR_FLAG_ACTIVATED] = 0xFFu;
+  s_page0Backup[NOR_FLAG_DATA]      = 0xFFu;
+  s_page0Backup[NOR_FLAG_SAVED]     = 0xFFu;
+  s_actts = 0xFFFFFFFFu;   /* кэш активации → «не активирован» (байт [1] сброшен) */
 
   P25Qx_QPI_EraseChip(&flash);
   s_dataEraseArmed = 1;   /* дозавершение — см. FlashDataEraseTick() */
@@ -1338,6 +1550,8 @@ void cmdFlashDataEraseHandler(LtpPacket *wc)
   /* Как и при обычном стирании чипа — lifetime-наработка обнуляется. */
   if (s_reg)
     s_reg->totalSec = 0u;
+
+  data_flag_clear();   /* нет данных → флаг «несохранённые» сброшен (зелёный) */
 
   sendPacket(wc->addr, wc->cmd, &f, 1);
 }
@@ -1356,6 +1570,271 @@ void FlashDataEraseTick(void)
 
   P25Qx_QPI_ProgramPage(&flash, 0, s_page0Backup, P25Q_PAGE_SIZE);
   s_dataEraseArmed = 0;
+}
+
+/* 0x2B — режим SPI, ТОЛЬКО для ручной проверки в Сервисе (22.07.2026, по
+ * просьбе). В «Работе» команда не шлётся вообще — там автоматический выбор
+ * (см. session_notes про энергорежимы: минимум периферии → одна линия SPI,
+ * standart_mode). SPIx2 (dual_mode) исключён — понадобится, может быть,
+ * только при большом составе периферии в некоторых конфигурациях; когда
+ * дойдёт — доделаем тогда же, сейчас в enum P25Qx_Mode он есть, но нигде не
+ * реализован (ни в одной read/write/erase-функции p25q128.c).
+ * payload[0]: 0 = SPI (standart_mode, все линии по одной),
+ *             1 = SPIx4 (quadspi_mode, данные по 4 линиям — как раньше).
+ *
+ * ФИКС (22.07.2026, по факту с железа): первая версия просто переставляла
+ * ПРОГРАММНЫЙ флаг flash.mode — а САМ ЧИП физически оставался в том
+ * протоколе, в котором был раньше (например, в QPI/4 линии после сна). Софт
+ * и чип расходились → последующие команды сыпались (SPI: чтение обрывалось
+ * на середине; SPIx4: сплошной мусор 0xDD). P25Qx_Reset() шлёт команду
+ * сброса ОБОИМИ протоколами (сначала 4-линейно, потом 1-линейно) — реально
+ * выводит чип из QPI независимо от того, в каком состоянии он был, и кладёт
+ * его в заводской SPI-дефолт. Зовём её перед КАЖДЫМ переключением — тогда
+ * софт и чип гарантированно синхронны. */
+void cmdFlashSetSpiModeHandler(LtpPacket *wc)
+{
+  uint8_t f = er_none;
+  switch (wc->data[0]) {
+  case 0:
+    P25Qx_Reset(&flash);        /* физически выводит чип из QPI → SPI (x1) */
+    break;
+  case 1:
+    P25Qx_Reset(&flash);        /* тот же чистый старт, независимо от прошлого состояния */
+    P25Qx_SetQuadSpi(&flash);   /* включает QE, переводит в quadspi_mode */
+    break;
+  default:
+    f = er_badarg;
+    break;
+  }
+  sendPacket(wc->addr, wc->cmd, &f, 1);
+}
+
+/* 0x2C — частота флеша (26.07.2026). Сервис работает на 80 МГц (см.
+ * ServiceClock_Config), QSPI тактируется от HCLK=80. ClockPrescaler задаёт
+ * делитель: F_флеша = 80/(Prescaler+1). payload[0] — индекс частоты:
+ *   0 → 80 МГц (Prescaler 0), 1 → 40 (1), 2 → 20 (3), 3 → 10 (7), 4 → 5 (15).
+ * Меняем делитель и переинициализируем QSPI; чип после reinit сбрасываем и
+ * (для SPIx4) заново включаем quad, чтобы софт и чип были синхронны. */
+static const uint8_t s_freqPrescaler[5] = { 0, 1, 3, 7, 15 };  /* 80/40/20/10/5 МГц */
+
+void cmdFlashSetFreqHandler(LtpPacket *wc)
+{
+  uint8_t f = er_none;
+  if (wc->n < 1 || wc->data[0] > 4) { f = er_badarg; sendPacket(wc->addr, wc->cmd, &f, 1); return; }
+
+  uint8_t wasQuad = (flash.mode == quadspi_mode);   /* сохранить протокол */
+
+  HAL_QSPI_DeInit(&hqspi);
+  hqspi.Init.ClockPrescaler = s_freqPrescaler[wc->data[0]];
+  if (HAL_QSPI_Init(&hqspi) != HAL_OK) { f = er_timeout; sendPacket(wc->addr, wc->cmd, &f, 1); return; }
+
+  /* чип и софт синхронизируем как в 0x2B */
+  P25Qx_Reset(&flash);
+  if (wasQuad) P25Qx_SetQuadSpi(&flash);
+
+  sendPacket(wc->addr, wc->cmd, &f, 1);
+}
+
+/* 0x30 — флаг «есть непрочитанные данные» во ВНУТРЕННЕЙ Flash (27.07.2026).
+ * Отдельная страница 122 (НЕ трогаем паспорт стр.123). Взводится на стенде по
+ * окончании инициализации, сбрасывается при считывании архива. Пишется только в
+ * Сервисе (внешнее питание); в рабочем цикле на батарее не трогаем. L4 ECC:
+ * страница пишется раз после стирания → взвод = erase+program магии, сброс =
+ * erase (страница = 0xFF). Приложение по этому флагу блокирует стирание, пока
+ * данные не считаны. payload[0]: 0=прочитать, 1=взвести, 2=сбросить.
+ * ответ: [0]=err, [1]=состояние (1=взведён/непрочитано, 0=сброшен/прочитано). */
+/* Битовая маска состояния (для ответа 0x30 и внутренних решений).
+ * 0x01 активирован (стр.121 ts — авторитет), 0x02 данные_есть, 0x04 сохранено. */
+static uint8_t data_flags_mask(void)
+{
+  /* ОДНО чтение первых 3 байт стр.0 вместо трёх отдельных QSPI-read (меньше
+   * нагрузки на шину; вызывается на каждый 0x30, W шлёт их часто). 03.08.2026. */
+  uint8_t hdr[3] = { 0xFFu, 0xFFu, 0xFFu };
+  P25Qx_QPI_Read(&flash, 0u, 3u, hdr);
+  uint8_t m = 0;
+  if (hdr[NOR_FLAG_ACTIVATED] == 0x00u) m |= 0x01u;   /* offset 0 */
+  if (hdr[NOR_FLAG_DATA]      == 0x00u) m |= 0x02u;   /* offset 1 */
+  if (hdr[NOR_FLAG_SAVED]     == 0x00u) m |= 0x04u;   /* offset 2 */
+  return m;
+}
+
+/* Взвести «данные_есть» (шим совместимости; напр. после загрузки образа). */
+void data_flag_set_if_clear(void)
+{
+  if (!data_norflag_get(NOR_FLAG_DATA))
+    data_norflag_set(NOR_FLAG_DATA);
+}
+
+/* Сброс NOR-флагов данных/сохранения делается СТИРАНИЕМ стр.0 (в erase-
+ * обработчиках через базу), поштучно занулять нельзя. Здесь — заглушка
+ * совместимости для старых вызовов из путей стирания. */
+void data_flag_clear(void) { /* NOR: сброс = стирание стр.0, см. 0x2A/EraseChip */ }
+
+/* 0x30 — ФЛАГИ СОСТОЯНИЯ в служебной стр.0 NOR (03.08.2026, замена внутр. Flash
+ * STM стр.122 DATAFLAG — та была опасна: erase+program + ECC на батарее). Байты
+ * стр.0 (Data.h) = ОСНОВНОЙ признак состояния: [1]=активирован, [2]=данные_есть,
+ * [3]=сохранение(=конец жизни). Журнал стр.121 хранит ts-историю (не дубль байта).
+ * Взвод = program байта →0x00 без стирания (безопасно на батарее). Сброс всех —
+ * стиранием данных (новая жизнь). Активация: байт [1] + ts в стр.121.
+ * payload[0]: 0=прочитать, 1=активация(+ts[1..4]), 2/3=сохранение, 4=данные появились.
+ * ответ [0]=err, [1]=маска (0x01 активирован, 0x02 данные, 0x04 сохранено). */
+void cmdDataFlagHandler(LtpPacket *wc)
+{
+  uint8_t resp[2] = { er_none, 0 };
+  uint8_t action = (wc->n >= 1) ? wc->data[0] : 0;
+  if (action == 1) {                 /* активация: NOR-байт [0] (осн. признак) +
+                                        START в журнал стр.121. ⚠ 03.08.2026:
+                                        активация АВТО-ЗАКРЫВАЕТ предыдущую жизнь,
+                                        если её не закрыли сохранением — незакрытых
+                                        «(идёт)» в середине истории быть не должно. */
+    data_norflag_set(NOR_FLAG_ACTIVATED);
+    /* Журнал рестартов (стр.124..127) НЕ сбрасываем — он копит ВСЕ перезапуски
+     * (общий счётчик). «За цикл/жизнь» считается РАЗНИЦЕЙ: текущий счётчик −
+     * счётчик на момент этой активации (сохранён в слоте стр.121 [6..7]). */
+    if (wc->n >= 5) {
+      uint32_t ts; memcpy(&ts, wc->data + 1, 4);
+      /* предыдущая жизнь ещё открыта (последнее событие = START)? закрыть END
+       * той же меткой (конец старой = начало новой), затем открыть новую. */
+      if (iflash_activation_last() != 0xFFFFFFFFu) iflash_activation_end(ts);
+      actts_write(ts);
+    }
+  } else if (action == 2) {          /* сохранение (жизнь НЕ закрываем) → флаг [3] */
+    data_norflag_set(NOR_FLAG_SAVED);
+  } else if (action == 3) {          /* сохранение + СНЯТИЕ с активации: END в
+                                        журнал стр.121 (ts из payload) + флаг [3]. */
+    if (wc->n >= 5) { uint32_t ts; memcpy(&ts, wc->data + 1, 4); actts_end(ts); }
+    data_norflag_set(NOR_FLAG_SAVED);
+  } else if (action == 4) {          /* данные появились (загрузка образа) → [2] */
+    data_norflag_set(NOR_FLAG_DATA);
+  }
+  resp[1] = data_flags_mask();
+  sendPacket(wc->addr, wc->cmd, resp, 2);
+}
+
+/* 0x31 — ФОРМАТ ЗАПИСИ ЦИКЛА (маркёр слова). Приложение (Настройки) задаёт:
+ * 0 базовый / 1 уплотнённый / 2 подробный. Хранится в ОЗУ (Stop2 сохраняет);
+ * персистентности пока нет — приложение шлёт формат при каждом подключении.
+ * Data.c::SaveParamOnEEPROM берёт маркёр через rec_format_marker(). 28.07.2026.
+ * ⚠ ТЕЛО уплотнённой/подробной записи пока = базовое 48Б (состав TODO) — сейчас
+ * различается только маркёр [0]; байтовую раскладку уплотн/подроб зададим позже. */
+static uint8_t s_recFormat = 0u;   /* 0 базовый по умолчанию */
+
+uint8_t rec_format_marker(void)
+{
+  switch (s_recFormat) {
+    case 1u:  return 0xF3u;   /* уплотнённый */
+    case 2u:  return 0xF4u;   /* подробный */
+    default:  return 0xF5u;   /* базовый */
+  }
+}
+
+void cmdRecFormatHandler(LtpPacket *wc)
+{
+  uint8_t err = er_none;
+  if (wc->n >= 1u && wc->data[0] <= 2u)
+    s_recFormat = wc->data[0];
+  else
+    err = er_badarg;
+  sendPacket(wc->addr, wc->cmd, &err, 1);
+}
+
+/* 0x2D — замер скорости флеша по ЭТАЛОННОЙ СЕКУНДЕ RTC (26.07.2026, финал).
+ * Никаких тактов и делителей: синхронизируемся на границу секунды RTC, ровно
+ * одну секунду гоняем операции с чипом по кругу в заданной области, считаем
+ * сколько страниц успели. Результат — страниц/с, приложение × 256 = байт/с.
+ * payload: [0]=режим (0=запись, 1=чтение), [1..4]=старт.страница, [5..8]=стр.
+ * ответ: [0]=err, [1..4]=число страниц за секунду (uint32 LE). */
+void cmdFlashSpeedTestHandler(LtpPacket *wc)
+{
+  uint8_t resp[5] = {0};
+  if (wc->n < 9) { resp[0] = er_badarg; sendPacket(wc->addr, wc->cmd, resp, 5); return; }
+
+  uint8_t  mode      = wc->data[0];
+  uint32_t startPage = *(uint32_t*)(wc->data + 1);
+  uint32_t nPages    = *(uint32_t*)(wc->data + 5);
+  if (nPages == 0) { resp[0] = er_badarg; sendPacket(wc->addr, wc->cmd, resp, 5); return; }
+
+  static uint8_t buf[256];
+  for (uint16_t i = 0; i < 256; ++i) buf[i] = (uint8_t)i;
+
+  RTC_TimeTypeDef t; RTC_DateTypeDef d;
+  /* синхронизация на границу секунды RTC */
+  HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+  HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+  uint8_t s0 = t.Seconds;
+  while (1) {
+    HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+    if (t.Seconds != s0) break;
+  }
+  uint8_t  sPrev = t.Seconds;
+  uint32_t secs  = 0;              /* сколько секунд эталона прошло */
+
+  /* ровно 5 секунд операций по кругу в области (точнее, чем 1 с) */
+  uint32_t count = 0, p = 0;
+  static uint8_t vbuf[256];
+
+  /* ЧТЕНИЕ — через memory-mapped (26.07.2026): контроллер сам подкачивает по
+   * AHB, без CPU-поллинга FIFO (прежний потолок ~820 КБайт/с). Вход один раз
+   * до цикла, выход после. Запись (mode 0) остаётся indirect. */
+  if (mode == 1) P25Qx_MemMapped(&flash);
+
+  while (1) {
+    uint32_t a = (startPage + p) << 8;
+    if (mode == 0) {
+      /* Реальная скорость ЗАПИСИ: erase+program, затем ПОДТВЕРЖДЕНИЕ чтением-
+       * сверкой. Ожидание WIP в драйвере ненадёжно — выходит на преждевременном
+       * WIP=0 сразу после команды, из-за чего счётчик крутился вхолостую
+       * (абсурдные 50000 стр/с > скорости чтения). Единицу считаем ТОЛЬКО когда
+       * страница реально записалась (readback == эталон) — это не зависит от WIP
+       * и даёт честное число завершённых записей в секунду. */
+      P25Qx_QPI_ErasePage(&flash, a);
+      P25Qx_QPI_ProgramPage(&flash, a, buf, 256);
+      P25Qx_QPI_Read(&flash, a, 256, vbuf);
+      uint8_t ok = 1;
+      for (uint16_t i = 0; i < 256; ++i) if (vbuf[i] != buf[i]) { ok = 0; break; }
+      if (ok) { ++count; if (++p >= nPages) p = 0; }   /* не подтвердилось — повторим ту же стр. */
+    } else {
+      /* ЧТЕНИЕ — последовательный проход ВСЕЙ области большими бёрстами:
+       * memory-mapped стримит непрерывно (CS держится, адрес авто-инкремент),
+       * доминирует фаза данных → видна разница линий/частоты и реальный потолок
+       * дампа, а не постраничные накладные (из-за них 1 и 4 линии давали одно). */
+      const volatile uint32_t *mp = (const volatile uint32_t*)(P25Q_MMAP_BASE + (startPage << 8));
+      uint32_t words = (nPages << 8) >> 2;   /* nPages*256/4 слов */
+      volatile uint32_t acc = 0;
+      for (uint32_t i = 0; i < words; ++i) acc += mp[i];
+      (void)acc;
+      count += nPages;                        /* прочитали всю область за проход */
+    }
+
+    HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+    if (t.Seconds != sPrev) { sPrev = t.Seconds; if (++secs >= 5) break; }
+  }
+
+  /* КРИТЕРИЙ ЦЕЛОСТНОСТИ ЧТЕНИЯ (26.07.2026): один проход сверки прочитанного
+   * с эталоном buf[i]=i, который фаза записи (mode 0) положила в ту же область.
+   * Скорость мерена чистым чтением выше (сверка её не занижает), а здесь
+   * подтверждаем ДАННЫЕ. Не сошлось → выбранная конфигурация (частота/линии)
+   * для чтения ненадёжна — цифру скорости показывать нельзя. */
+  uint32_t badWords = 0;
+  if (mode == 1) {
+    const volatile uint32_t *mp = (const volatile uint32_t*)(P25Q_MMAP_BASE + (startPage << 8));
+    uint32_t words = (nPages << 8) >> 2;
+    for (uint32_t i = 0; i < words; ++i) {
+      uint32_t bo  = (i << 2) & 0xFF;                 /* смещение байта в странице, кратно 4 */
+      uint32_t exp = bo | ((bo+1)<<8) | ((bo+2)<<16) | ((bo+3)<<24);
+      if (mp[i] != exp) ++badWords;
+    }
+  }
+
+  if (mode == 1) P25Qx_ExitMemMapped(&flash);   /* вернуть indirect для обычных команд */
+
+  resp[0] = er_none;
+  if (mode == 0 && count == 0)    resp[0] = er_timeout;  /* запись реально не идёт */
+  else if (mode == 1 && badWords) resp[0] = er_timeout;  /* чтение не сошлось с эталоном */
+  *(uint32_t*)(resp + 1) = count / 5;   /* страниц в секунду */
+  sendPacket(wc->addr, wc->cmd, resp, 5);
 }
 
 void cmdFlashReadHandler(LtpPacket *wc)

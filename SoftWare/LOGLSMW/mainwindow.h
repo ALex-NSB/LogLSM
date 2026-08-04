@@ -97,12 +97,13 @@ private:
     // ── Активация устройства (ТЗ v2 §2.6, §3) ───────────────────────────────
     enum class ActStep {
         Idle,       // не запущена
-        Archive,    // 1 — автоархив (чтение заголовка Flash)
-        Check,      // 2 — проверка устройства (WHO_AM_I + температура)
-        SyncTime,   // 3 — синхронизация времени
-        Erase,      // 4 — стирание Flash
-        TestWrite,  // 5 — тестовая запись/чтение
-        SetReady,   // 6 — постановка на готовность
+        Archive,    // сегм 0 — сохранить данные (по флагу)
+        Check,      // сегм 1 — проверка устройства (WHO_AM_I + температура)
+        ResetWdt,   // сегм 2 — сброс счётчиков рестартов (per-cycle отсчёт)
+        SyncTime,   // сегм 3 — синхронизация времени
+        Erase,      // сегм 4 — стирание Flash
+        TestWrite,  // сегм 5 — тестовая запись/чтение
+        SetReady,   // сегм 6 — постановка на готовность (Активация)
         Done,       // завершена успешно
         Error       // ошибка
     };
@@ -111,6 +112,36 @@ private:
         ActStep step     = ActStep::Idle;
         int     subPhase = 0;   // внутренняя фаза шага
     } m_act;
+
+    // Автосохранение образа на диск в шаге 1 активации (27.07.2026): если на
+    // устройстве есть данные — читаем их постранично и пишем единый Intel HEX
+    // (тот же формат, что грузит «Образ RG/LOG» — loadImageFromHexFile), затем
+    // волна продолжается сама. Отдельный от m_test read-loop, свой тег TagActDump.
+    struct ActDumpState {
+        bool       running      = false;
+        bool       continueWave = false;  // true: после сохранения продолжить волну активации
+        quint16    page      = 0;    // следующая запрашиваемая страница
+        quint32    pageEnd   = 0;    // первая страница ЗА диапазоном (не вкл.); quint32:
+                                     // kFlashTotalPages=65536 НЕ влезает в quint16 (→0, баг)!
+        quint16    startPage = 0;    // первая страница образа (для адресов HEX)
+        QByteArray buf;              // накопленные сырые байты (256×N)
+        QString    path;             // куда пишем .hex
+    } m_actDump;
+
+    // Сохранить данные устройства на диск (образ HEX) и сбросить флаг
+    // «несохранённые данные». continueWave=true → по завершении продолжить
+    // волну активации (шаг 1); false → отдельная кнопка «Сохранить данные».
+    void startDataDump(bool continueWave);
+    void dataSaveFlow();   // §3.2 политика сохранения: активировано×флаг (см. .cpp)
+
+    // Обновить сегмент 0 ленты по флагу данных + занятости Flash (28.07.2026):
+    // красный «Сохранить» (флаг взведён) / жёлтый «Стёрто» (Flash пуста) /
+    // зелёный «Сохранено» (данные есть и сохранены). Зовётся из ответа DATA_FLAG
+    // и по завершении сканирования памяти (m_firstFreePage).
+    void updateSaveSegment();
+    void updateActivationState();   // трёхпозиционное состояние: не активирован / между жизнями / идёт жизнь
+    bool saveImageToHexFile(const QString &path, quint16 startPage,
+                            const QByteArray &buf, QString &errMsg) const;
 
     // Одиночный клик по сегменту (вне полной автопоследовательности,
     // 21.07.2026): сегмент светится жёлтым (Active) с момента отправки
@@ -167,13 +198,52 @@ private:
         // (баг до 02.07.2026: в lblCurByte копировался editTestByte, и
         // колонка «факт» ничего не проверяла). -1 = ещё не читали (в т.ч.
         // во время фазы записи) — ячейка пустая (пробел, соглашение UI).
-        // lastReadUniform=false: страница неоднородна (байты разные —
-        // нормально для дампа реальных данных), в UI после байта «…».
+        // Раньше был ещё lastReadUniform («…» при неоднородной странице) —
+        // убран (22.07.2026, по замечанию: не должно быть домысливания,
+        // только реально прочитанное значение).
         // Агрегатные `m_test = {...}` (8 инициализаторов) сбрасывают эти
         // поля в дефолты автоматически (C++14 default member init).
         int       lastReadByte    = -1;
-        bool      lastReadUniform = true;
     } m_test;
+
+    // Замер реальной скорости операции записи/чтения теста (26.07.2026):
+    // засекаем время от нажатия «Запись»/«Чтение» до завершения серии,
+    // объём = страниц × циклов × 256 байт, выводим КБ/с в lblMemSpeed.
+    QElapsedTimer m_memOpTimer;
+    qint64        m_memOpBytes = 0;
+    qint64        m_speedBytes = 0;   // объём последней операции для расчёта КБ/с из накопленного времени
+    double        m_speedWrKbps = -1.0; // скорость записи (W-фаза замера), <0 = ждём W
+    // Замер скорости чтения (27.07.2026): эталон пишется ОДИН раз за сессию на
+    // безопасной низкой частоте (с verify), дальше кнопка только читает по
+    // готовому на выбранной частоте/режиме и сверяет. m_speedPhase: 0=простой,
+    // 1=ждём ответ записи эталона, 2=ждём ответ чтения.
+    bool          m_speedRefReady = false;  // эталон записан и сверен в текущей области
+    int           m_speedPhase    = 0;
+    int           m_speedRefStart = -1;     // область, для которой записан эталон (стр.)
+    int           m_speedRefPages = -1;     // при смене Старт/Страниц эталон переписывается
+
+    // «Тихий» автодамп (вход на вкладку / после стирания / после записи
+    // образа, 22.07.2026) — memTestDump() АСИНХРОННАЯ (шлёт FLASH_READ,
+    // ждёт ответ), поэтому m_test нельзя восстанавливать сразу после
+    // вызова (это ломало реальный ход дампа — краш при заходе на вкладку,
+    // найдено по факту). Вместо этого — флаг: по факту РЕАЛЬНОГО завершения
+    // (в обработчике ответа) панель «Проверка» просто очищается, а не
+    // показывает результат дампа как будто это был настоящий тест.
+    bool m_silentDump = false;
+    // После «Запись»/«Чтение» показываем дамп сразу (без «Прочитать») — но
+    // memTestDump() переиспользует m_test.* под СВОЙ проход чтения (диапазон
+    // ограничен kAutoDumpMaxPages=64), стирая реальный результат теста
+    // (Страниц/Байт/Старт). Найдено по факту (22.07.2026): после записи
+    // 100 страниц панель показывала «Страниц 64», «Байт» от дампа, а не от
+    // теста. Сохраняем состояние ДО вызова, восстанавливаем, когда дамп
+    // реально (асинхронно) завершится — см. m_silentDump рядом по духу.
+    MemTestState m_savedTestForDump{};
+    bool m_restoreTestAfterDump = false;
+    // После завершения «Образ» — подтянуть «Старт»/Задать к НОВОЙ первой
+    // свободной странице по факту пересчёта (22.07.2026, по просьбе: чтобы
+    // сразу указывал на свободное место для следующей операции). Флаг —
+    // пересчёт асинхронный (flashBinSearchStart), значение узнаём позже.
+    bool m_syncStartAfterImage = false;
 
     // Кеш последнего записанного образа (для Сравнить)
     QList<QByteArray> m_imgCache;
@@ -185,17 +255,6 @@ private:
     QWidget  *m_imgActiveBtn  = nullptr;  // кнопка, запустившая образ
     QString   m_imgBtnLabel;              // исходная надпись кнопки
     QString   m_imgFileName;              // имя файла образа (для лога завершения)
-
-    // Образ перед записью теперь сначала стирает весь чип (решение 20.06.2026 —
-    // запись образа не подразумевает сохранение старых данных, а старые данные
-    // на чипе раньше путали разбор архива). Параметры записи сохраняются здесь
-    // на время ожидания стирания (FLASH_ERASE/FLASH_STATE, тег TagImg), а
-    // startImageWrite() запускается из обработчика FLASH_STATE по готовности.
-    QPushButton      *m_imgPendingBtn = nullptr;
-    QString           m_imgPendingLabel;
-    quint16           m_imgPendingStartPage = 1;
-    QList<QByteArray> m_imgPendingPages;
-    QString           m_imgPendingFileName;
 
     // Какой образ сейчас фактически лежит в Flash (для подсветки кнопок
     // «Образ RG/LOG» — см. archiveMode → refreshImgButtonsHighlight).
@@ -272,7 +331,11 @@ private:
         QVector<double> plotRpm;
         QVector<double> plotTs;         // tsStart цикла (для тултипа столбика) 18.07
         QVector<double> plotDuration;   // длительность цикла (с) — столбчатая
+        QVector<double> plotTemp;       // температура (°C) по циклам — график 5 (27.07.2026)
                                          // диаграмма «Активное время», 1 столбик = 1 цикл
+        QVector<double> plotEpoch;      // поколение часов по циклам (индекс-синхронно
+                                         // с plotKeys) — смена = вертикальная линия стыка
+                                         // на графиках (02.08.2026)
         // По-записные данные завершённых записей (03.07.2026, для вывода
         // автономного журнала на вкладке «Стенд» — stendShowDeviceLog():
         // агрегатов выше недостаточно, нужны Старт/Стоп/Общее каждого
@@ -282,6 +345,9 @@ private:
         QVector<quint32> recTs;      // timestamp_start (unix)
         QVector<quint32> recDur;     // duration, с
         QVector<quint32> recTotal;   // duration_total, с
+        QVector<quint16> recEpoch;   // поколение часов rec[40..41]: смена между
+                                     // соседними записями = точка стыка (часы
+                                     // обнулялись после потери питания). 02.08.2026
     } m_arc;
 
     void archiveStart(ArchiveMode mode, quint16 startPage, int pageCount);
@@ -311,8 +377,32 @@ private:
                                             // ось X синхронна с plotUptime (18.07.2026)
     class QCPBars *m_vibBars    = nullptr;  // столбики «акселерометр · уровень» (vib1_peak)
     class QCPBars *m_vib2Bars   = nullptr;  // столбики «акселерометр · удары» (vib2_peak)
+    class QCPBars *m_tempBars   = nullptr;  // столбики «температура» (°C по циклам, 27.07.2026)
+    QVector<class QCPItemStraightLine*> m_seamItems;   // вертикальные линии стыков времени
+                                                       // на графиках «Данных» (02.08.2026)
+    // Макс-значения графиков ВЕРТИКАЛЬНО в правом конце (27.07.2026): индексы
+    // как kind — 1=обороты, 2=вибрация, 3=удары, 4=температура (0=время не исп.).
+    class QCPItemText *m_valLbl[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+    class QAction *m_actSimulation = nullptr;   // «Симуляция» в меню «Вид» (27.07.2026)
+    // Флаг «есть непрочитанные данные» (0x30, внутр. Flash прибора, 27.07.2026):
+    // взведён → блокируем разрушающие операции (стирание и запись), пока не
+    // нажали «Считать данные» (сброс). Обновляется ответом DATA_FLAG.
+    bool m_dataFlagSet = false;
+    bool m_deviceActivated = false;   // ts_activation != 0xFFFFFFFF (из GET_STATS) — для dataSaveFlow
+    bool m_dataPresent = false;       // NOR-флаг [1] стр.0: данные физически в NOR (не по скану 0xFF!)
+    bool m_dataSaved   = false;       // NOR-флаг [2] стр.0: сохранение выполнено (конец жизни)
+    quint32 m_tsActivation = 0xFFFFFFFFu;   // ts последней активации (из GET_STATS) — t0 калибровки от активации
+    bool m_saveWasWave = false;   // «Сохранено»: зелёный ТОЛЬКО после волны активации; одиночное сохранение → жёлтый
+    // Грубая калибровка RTC («Калибровка» → Часы RTC), 03.08.2026:
+    QDateTime m_rtcCalT0;             // метка ПК в момент «Старт» (синхро по границе секунды)
+    bool   m_rtcCalActive = false;    // идёт выдержка калибровки
+    double m_rtcCurPpm     = 0.0;     // текущая поправка устройства (RTC_CALIB_GET)
+    double m_rtcCalNewPpm  = 0.0;     // рассчитанная новая поправка (для «Применить»)
+    bool m_serviceMode = false;   // «Сервис»: в операторе доступны только «Считать данные»/«Активировать»
+    bool m_vbatBlink   = false;   // фаза моргания сегмента VBAT (заглушка, 28.07.2026)
     void onActivationSectorClicked(int idx);  // клик по сегменту → его операция (17.07.2026)
     void archiveUpdateDashboard();  // перерисовка «Данных» из m_arc (и по живым пушам)
+    void archiveDrawSeams();        // вертикальные линии стыков времени на 5 графиках
     void updateCycleScroll();       // синхронизация ползунка истории с осью циклов
     bool stendValidateRanges();     // живая проверка Мин≤Макс: подсветка+блок кнопок
     void stendFillSubSpeeds(const QByteArray &payload);  // 0x29: макс по полкам скорости
@@ -442,6 +532,8 @@ private:
 
     void flashBinSearchStart();
     void flashBinSearchSendNext();
+    void updateOccupiedLabel();   // «Занято»: Задать=занято стр.(красн.), Факт=осталось стр.(зел.)
+    void showMemSpeed(int mode);  // замер скорости контроллером (0=запись,1=чтение), 0x2D
     void flashBinSearchHandlePage(const QByteArray &data);
     void flashBinSearchUpdateUi();
 
@@ -492,7 +584,7 @@ private:
     // .hex-файла, без устройства). Ведущая лента совмещения — эта
     // (приоритет Flash, решение пользователя 03.07): выводятся ВСЕ записи,
     // файл журнала подставляется в «Стенд» только там, где нашлась пара.
-    struct OfflineDevRec { quint32 ts = 0, dur = 0, total = 0; int rpm = 0; };
+    struct OfflineDevRec { quint32 ts = 0, dur = 0, total = 0; int rpm = 0; quint16 epoch = 0; };
     QVector<OfflineDevRec> m_offlDev;
     QString m_offlDevSrc;   // подпись источника записей для сводки в панели
                             // («память устройства» / «образ <файл>»)
@@ -552,6 +644,24 @@ private:
 
     QTimer m_monTimer;
 
+    // Авто-калибровка скорости: проход стенда по столбцу «Задано», живой опрос
+    // гироскопа на каждой ступени → «Измерено» (03.08.2026).
+    struct SpeedCalRun {
+        bool  running = false;
+        int   curRow  = 0;          // текущая строка таблицы
+        int   phase   = 0;          // 0 = разгон/устаканивание, 1 = измерение
+        int   phaseMs = 0;          // накоплено мс в текущей фазе
+        QVector<double> samples;    // выборки сырой об/мин за окно измерения (усечённое среднее)
+        QVector<double> targets;    // заданные скорости (столбец 0), по строкам
+    } m_speedCal;
+    QTimer m_speedCalTimer;
+    void   speedCalAutoStart();
+    void   speedCalAutoTick();
+    void   speedCalAutoStop(bool finished);
+    void   speedCalAutoAccum(const QByteArray &payload);   // накопить rpm из GET_AXES_RAW
+    void   speedCalHighlightRow(int row, bool on, int phase); // подсветка текущей ступени
+    void   speedCalClearHighlight();
+
     void   setupMonitor();
     void   monStart();
     void   monPause();
@@ -572,6 +682,9 @@ private:
     qint32 selectedBaud() const;
     quint8 dashboardTempCmd() const;
     void requestCmd(quint8 cmd, const QByteArray &payload = {}, quint32 tag = 0);
+    void speedCalSetCell(int row, int col, const QString &text, bool editable = true);
+    void speedCalRecompute(int row);                              // Δ% и коэфф. новый по задано/измерено
+    void speedCalSetRow(int row, double given, double measured, double workKoef);
 };
 
 #endif // MAINWINDOW_H

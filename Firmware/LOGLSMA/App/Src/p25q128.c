@@ -72,7 +72,18 @@ uint8_t P25Qx_ReadSR(P25Qx_HandleTypeDef *handle, uint8_t reg)
 
 void Wait_Busy(P25Qx_HandleTypeDef *handle)
 {
-    while((P25Qx_ReadSR(handle, 1) & 0x01) == 0x01);
+    /* ЗАЩИТА ОТ ВЕЧНОГО СПИНА (03.08.2026): если флеш вернул мусор в SR (не
+     * запитан / не в том режиме / QPI-рассинхрон), WIP читается как 1 всегда и
+     * прежний бесконечный while() ВЕШАЛ МК целиком — переставали отвечать даже
+     * команды, не трогающие флеш (0x1b и т.п.). Ограничиваем ожидание: реальная
+     * запись байта/страницы <1 мс, стирание сектора ~мс — 1 с с запасом; за это
+     * время либо WIP снимется, либо флеш недоступен и дальше бессмысленно ждать. */
+    uint32_t t0 = HAL_GetTick();
+    while((P25Qx_ReadSR(handle, 1) & 0x01) == 0x01)
+    {
+        if ((HAL_GetTick() - t0) > 1000u)
+            break;
+    }
 }
 
 /* Программный сброс чипа из ЛЮБОГО состояния (SPI или QPI) — самовосстановление
@@ -274,10 +285,25 @@ void P25Qx_QPI_ErasePage(P25Qx_HandleTypeDef *handle, uint32_t addr)
 void P25Qx_QPI_EraseSector(P25Qx_HandleTypeDef *handle, uint32_t addr)
 {
   P25Qx_QPI_EnableWrite(handle);
-  QSPI_Send_Command(handle, SECTOR_ERASE_CMD, addr, 0,
-                    QSPI_INSTRUCTION_4_LINES,
-                    QSPI_ADDRESS_4_LINES, QSPI_ADDRESS_24_BITS,
-                    QSPI_DATA_NONE);
+  /* 22.07.2026: раньше здесь БЕЗ ПРОВЕРКИ handle->mode жёстко слались 4 линии
+   * (инструкция+адрес) — работало только пока режим всегда был qpi/quadspi.
+   * После появления ручного переключения на обычный SPI (0x2B, LOGLSMW)
+   * команда стала уходить неверной длины линий → чип её не распознавал.
+   * Правило то же, что в ErasePage/EraseChip: 4 линии только в qpi_mode. */
+  if(handle->mode == qpi_mode)
+  {
+    QSPI_Send_Command(handle, SECTOR_ERASE_CMD, addr, 0,
+                      QSPI_INSTRUCTION_4_LINES,
+                      QSPI_ADDRESS_4_LINES, QSPI_ADDRESS_24_BITS,
+                      QSPI_DATA_NONE);
+  }
+  else
+  {
+    QSPI_Send_Command(handle, SECTOR_ERASE_CMD, addr, 0,
+                      QSPI_INSTRUCTION_1_LINE,
+                      QSPI_ADDRESS_1_LINE, QSPI_ADDRESS_24_BITS,
+                      QSPI_DATA_NONE);
+  }
   Wait_Busy(handle);
 }
 
@@ -359,16 +385,77 @@ void P25Qx_QPI_Read(P25Qx_HandleTypeDef *handle, uint32_t addr, uint16_t len, ui
   QSPI_Receive(handle, data, len);
 }
 
+/* Перевод QUADSPI в memory-mapped: параметры чтения = те же, что в
+ * P25Qx_QPI_Read по режимам (0x0B/dummy10/4 линии для QPI, 0x6B/dummy8 для
+ * quadspi, 0x0B/dummy8/1 линия для standart). После этого флеш читается как
+ * память по P25Q_MMAP_BASE. */
+void P25Qx_MemMapped(P25Qx_HandleTypeDef *handle)
+{
+  QSPI_CommandTypeDef cmd = {0};
+  QSPI_MemoryMappedTypeDef mm = {0};
+
+  cmd.Instruction       = 0x0B;
+  cmd.Address           = 0;
+  cmd.AddressSize       = QSPI_ADDRESS_24_BITS;
+  cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+  cmd.DdrMode           = QSPI_DDR_MODE_DISABLE;
+  cmd.DdrHoldHalfCycle  = QSPI_DDR_HHC_ANALOG_DELAY;
+  cmd.SIOOMode          = QSPI_SIOO_INST_EVERY_CMD;
+
+  if (handle->mode == qpi_mode)
+  {
+    cmd.InstructionMode = QSPI_INSTRUCTION_4_LINES;
+    cmd.AddressMode     = QSPI_ADDRESS_4_LINES;
+    cmd.DataMode        = QSPI_DATA_4_LINES;
+    cmd.DummyCycles     = 10;
+  }
+  else if (handle->mode == quadspi_mode)
+  {
+    cmd.Instruction     = 0x6B;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode     = QSPI_ADDRESS_1_LINE;
+    cmd.DataMode        = QSPI_DATA_4_LINES;
+    cmd.DummyCycles     = 8;
+  }
+  else
+  {
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode     = QSPI_ADDRESS_1_LINE;
+    cmd.DataMode        = QSPI_DATA_1_LINE;
+    cmd.DummyCycles     = 8;
+  }
+
+  mm.TimeOutActivation = QSPI_TIMEOUT_COUNTER_DISABLE;
+  mm.TimeOutPeriod     = 0;
+  HAL_QSPI_MemoryMapped(handle->hqspi, &cmd, &mm);
+}
+
+/* Выход из memory-mapped обратно в indirect (иначе обычные команды не пройдут). */
+void P25Qx_ExitMemMapped(P25Qx_HandleTypeDef *handle)
+{
+  HAL_QSPI_Abort(handle->hqspi);
+}
+
 uint32_t P25Qx_QPI_ReadID(P25Qx_HandleTypeDef *handle)
 {
   uint32_t id;
-  QSPI_Send_Command(handle, REMS_CMD,
-                    0,                                                          //Addres
-                    0,                                                          //Dummy
-                    QSPI_INSTRUCTION_4_LINES,
-                    QSPI_ADDRESS_4_LINES,
-                    QSPI_ADDRESS_24_BITS,
-                    QSPI_DATA_4_LINES);
+  /* 22.07.2026: та же правка, что в EraseSector — проверка handle->mode. */
+  if (handle->mode == qpi_mode)
+  {
+    QSPI_Send_Command(handle, REMS_CMD, 0, 0,
+                      QSPI_INSTRUCTION_4_LINES,
+                      QSPI_ADDRESS_4_LINES,
+                      QSPI_ADDRESS_24_BITS,
+                      QSPI_DATA_4_LINES);
+  }
+  else
+  {
+    QSPI_Send_Command(handle, REMS_CMD, 0, 0,
+                      QSPI_INSTRUCTION_1_LINE,
+                      QSPI_ADDRESS_1_LINE,
+                      QSPI_ADDRESS_24_BITS,
+                      QSPI_DATA_1_LINE);
+  }
   QSPI_Receive(handle, (uint8_t*)&id, 3);
   return id;
 }

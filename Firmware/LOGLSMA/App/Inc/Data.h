@@ -114,6 +114,11 @@
 #define PLATEAU_BAND_MIN       4.0f
 #define PLATEAU_DEBOUNCE       3u
 
+/* Прореживание опроса температуры IMU в цикле (02.08.2026): снимаем максимум
+ * раз в TEMP_SAMPLE_EVERY выборок гироскопа — температура кристалла медленная,
+ * чаще незачем (см. HandleSensorData). */
+#define TEMP_SAMPLE_EVERY      32u
+
 #pragma pack(push,1)
 typedef struct RTC_DateTimeS
 {
@@ -190,6 +195,10 @@ typedef struct
   float    jerkSumSq;  /* канал 2: Σ jerk² за цикл (RMS), мг² */
   float    prevAmag;   /* предыдущий |a| для разности (jerk), мг */
   uint8_t  prevAmagInit; /* 0 = prevAmag ещё не засеян */
+  int16_t  tempMax;    /* МАКСИМУМ температуры IMU LSM за цикл, °C (идеология maxRpm/
+                        * maxVibro). Опрос редкий (throttle) — температура медленная.
+                        * INT16_MIN = ни разу не снята (короткий цикл). 02.08.2026 */
+  uint16_t tempThrottle; /* счётчик прореживания опроса температуры (0 → снять) */
   /* АВТОРЕЙНДЖ шкалы accel на время вращения (18.07.2026): сидим на ±2g
    * (макс. чувствительность), при клипе сэмпла удваиваем шкалу до ±16g.
    * Вибрация копится СРАЗУ В МГ (accSensMg — текущая чувствительность),
@@ -220,5 +229,33 @@ uint32_t SaveTotalSec(RegistratorData *r);
 uint32_t LoadTotalSec(RegistratorData *r);
 uint32_t SaveParamOnEEPROM(RegistratorData *r);
 uint32_t HandleSensorData(RegistratorData *r);
+
+/* Калибровка скорости (таблица узлов, поэкземплярно на стр.123). 03.08.2026. */
+void     data_speedcal_load(void);                       /* стр.123 → RAM (дефолт если нет) */
+uint16_t data_speedcal_get(float *r, float *k);          /* текущая таблица → r/k, возврат n */
+int      data_speedcal_set(const float *r, const float *k, uint16_t n);  /* запись + применить */
+
+/* Флаги в служебной стр.0 NOR (03.08.2026, замена внутр. стр.122 DATAFLAG).
+ * Каждый флаг = ОТДЕЛЬНЫЙ ЦЕЛЫЙ БАЙТ подряд (визуально удобно в дампе стр.0):
+ * база 0x55/0xFF, взведён = 0x00 (program бита 1→0 без стирания — безопасно на
+ * батарее). Set-only, сброс — стиранием данных. БАЙТ = основной признак ТЕКУЩЕГО
+ * состояния; журнал стр.121 хранит ts-историю (не дубль байта). Нумерация с 1-го
+ * байта = offset 0. */
+#define NOR_FLAG_ACTIVATED  0u   /* 1-й байт (offset 0) активирован (осн. признак; ts — в стр.121) */
+#define NOR_FLAG_DATA       1u   /* 2-й байт (offset 1) данные есть (запись в NOR появилась) */
+#define NOR_FLAG_SAVED      2u   /* 3-й байт (offset 2) сохранение выполнено = конец «жизни» */
+int      data_norflag_get(uint8_t idx);   /* 1 = взведён (байт idx == 0x00) */
+void     data_norflag_set(uint8_t idx);   /* добить байт idx → 0x00 (program) */
+
+/* Калибровка часов RTC (smooth-calib, поправка ppm на стр.123). 03.08.2026. */
+void     rtc_calib_apply_from_flash(void);   /* стр.123 → RTC_CALR (дефолт −305 ppm если нет). Звать на boot */
+float    rtc_calib_get_ppm(void);            /* текущая применённая поправка, ppm */
+int      rtc_calib_set_ppm(float ppm);       /* сохранить на стр.123 + применить. 0=ok */
+
+/* Паспорт устройства (стр.123). get: 1=задан/0=нет; set: 0=ok/-1=ошибка. */
+int      data_passport_get(char serial[16], uint8_t *variant,
+                           uint16_t *year, uint8_t *month, uint8_t *day);
+int      data_passport_set(const char serial[16], uint8_t variant,
+                           uint16_t year, uint8_t month, uint8_t day);
 
 #endif //__DATA_H

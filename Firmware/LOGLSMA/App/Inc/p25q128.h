@@ -57,6 +57,7 @@ typedef struct {
   enum P25Qx_State state;
 } P25Qx_HandleTypeDef;
 
+void P25Qx_Reset(P25Qx_HandleTypeDef *handle);
 void P25Qx_Init(P25Qx_HandleTypeDef *handle);
 void P25Qx_DeInit(P25Qx_HandleTypeDef *handle);
 
@@ -75,5 +76,14 @@ void P25Qx_QPI_EraseSector(P25Qx_HandleTypeDef *handle, uint32_t addr);
 void P25Qx_QPI_EraseChip(P25Qx_HandleTypeDef *handle);
 void P25Qx_QPI_Read(P25Qx_HandleTypeDef *handle, uint32_t addr, uint16_t len, uint8_t *data);
 uint32_t P25Qx_QPI_ReadID(P25Qx_HandleTypeDef *handle);
+
+/* Memory-mapped чтение (26.07.2026): флеш виден как область памяти по
+ * P25Q_MMAP_BASE, контроллер QUADSPI сам подкачивает данные по AHB —
+ * без CPU-поллинга FIFO. Даёт максимальную скорость последовательного
+ * чтения. После MemMapped любую indirect-команду можно слать только
+ * после ExitMemMapped (HAL_QSPI_Abort). Не требует DMA-канала/.ioc. */
+#define P25Q_MMAP_BASE       0x90000000u
+void P25Qx_MemMapped(P25Qx_HandleTypeDef *handle);
+void P25Qx_ExitMemMapped(P25Qx_HandleTypeDef *handle);
 
 #endif //__P25Q128_H

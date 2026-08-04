@@ -77,6 +77,12 @@ uint8_t ble_flag;
                                * вибрация зажима батареи в поле) */
 volatile uint8_t g_wakeCause = 0;
 
+/* «Часы обнулились на этом boot» — ставит MX_RTC_Init() (rtc.c) в ветке
+ * отсутствия маркёра 0xBEBE, потребляет ServiceStorageBootLog() ниже (пишет
+ * EVT_CLOCKZERO в журнал iflash). RAM-флаг живёт в пределах одного boot, чего
+ * достаточно: обе точки — на раннем старте, до основного цикла. (02.08.2026) */
+volatile uint8_t g_clockZeroed = 0;
+
 /* Маркер «backup-домен жив» в RTC_BKP_DR0. Backup гаснет ТОЛЬКО с питанием
  * (ST-Link reset его не трогает). Маркер на месте на загрузке → это перешивка/
  * reset (НЕ питание); маркер пропал → питание пропадало (тумблер/провал, при
@@ -108,6 +114,7 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void lsm6dso_init(void);
 static void ServiceClock_Config(void);
+static void WorkClock_Config(void);   /* штатный клок Работы: HCLK 16 МГц (26.07.2026) */
 static void StandbyDetectWakeCause(void);   /* Стадия 1 Standby: причина пробуждения */
 static void ServiceStorageBootLog(void);    /* Стадия 1b: причина сброса → журнал iflash */
 /* USER CODE END PFP */
@@ -144,7 +151,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  ServiceClock_Config();   /* HCLK = 16 МГц ДО инициализации периферии */
+  WorkClock_Config();   /* HCLK = 16 МГц ДО инициализации периферии (26.07.2026: разгон 80 только в Сервисе) */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -319,6 +326,17 @@ int main(void)
        * сбрасываем его на всякий случай перед следующим Stop2, чтобы не
        * оставался взведённым от предыдущего пробуждения. */
       __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WUF1);
+      /* ⚠ 28.07.2026 ФИКС «Работа не просыпалась». Договорённость 26.07: 80 МГц
+       * ТОЛЬКО в Сервисе, «Работа» на минимале 16 МГц. Сервис поднимал клок до
+       * 80 (PLL) и переинициализировал UART (ComInit) под 80. На ВЫХОДЕ из
+       * Сервиса надо вернуть И клок (16 МГц, HSI), И UART/DMA под 16 — иначе:
+       *  (1) автомат входил в Stop2 на 80 МГц, откуда accel-INT/EXTI13 не
+       *      поднимал ядро → «Работа» висла в первом сне (все «нет ответа»);
+       *  (2) даже проснувшись, CYCLE_PUSH шёл на неверном бод (UART от 80).
+       * На рабочей 20.07 весь режим был 16 МГц (Сервис тоже) — потому работало.
+       * Дифф main.c 20.07↔тек: клок — единственное отличие в пути сна. */
+      WorkClock_Config();   /* назад на 16 МГц (HSI, PLL off) */
+      ComInit();            /* UART/DMA заново под 16 МГц (BRR 921600) */
     }
 
     /* Автомат SLEEP->CONFIRM->ROTATING (режим A) — ЕДИНСТВЕННЫЙ
@@ -497,7 +515,7 @@ int main(void)
       HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
       HAL_NVIC_DisableIRQ(RTC_WKUP_IRQn);
       HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);   /* проснулись — источники сна больше не нужны */
-      ServiceClock_Config();
+      WorkClock_Config();   /* Работа — штатные 16 МГц (26.07.2026) */
       PushWdgKick();   /* RTC-глажение сторожа в «Работе» → метка 0x25 при кабеле (18.07.2026) */
 
       /* Источник пробуждения из ПАССИВА (design B, 17.07.2026): WUF2 (фронт
@@ -690,6 +708,13 @@ static void ServiceStorageBootLog(void)
    * ⚠ Если ST-Link настроен на АППАРАТНЫЙ reset (NRST без SFTRST) — перешивка
    * тоже посчитается; тогда переключить в IDE reset mode на «software system
    * reset» ЛИБО пересмотреть признак (по rccMask видно, что реально стоит). */
+  /* СЧЁТЧИК рестартов (стр.124..127) работает ВСЕГДА — инкрементируется на каждом
+   * реальном сбросе (в т.ч. «между жизнями» и при тестировании), сбрасывается
+   * «Сброс WDT». В ЗАПИСЬ журнала активаций (стр.121) число попадает только при
+   * событии активации/сохранения — а оно и так происходит лишь когда прибор
+   * активирован. Поэтому гейт на сам счётчик НЕ нужен (03.08.2026, по уточнению:
+   * «счётчик срабатывает/инкрементируется/сбрасывается, но не отражается в записи
+   * пока не активен» — за «запись» отвечает стр.121, а не гейт здесь). */
   if (rcc & 0x01u)
   {
     iflash_journal_append(EVT_WATCHDOG, 0u, rcc);
@@ -702,6 +727,18 @@ static void ServiceStorageBootLog(void)
   /* SFTRST (перешивка/программный reset) и Standby-выход (флаг SB, PWR) — не сбои,
    * не логируем. Во время отладки (перешивки/щелчки питанием) события всё равно
    * попадут — поэтому провижн перед полем СТИРАЕТ журнал (см. design §6). */
+
+  /* Обнуление часов (02.08.2026) — ОТДЕЛЬНАЯ ось от reset-причины выше. Флаг
+   * взведён в MX_RTC_Init(), когда маркёр 0xBEBE в RTC_BKP_DR0 отсутствовал =
+   * RTC реально уехал в 00:00 01.01.2000. Пишем EVT_CLOCKZERO → его накопленный
+   * счётчик (iflash_journal_count) = «поколение часов», которое SaveParamOnEEPROM
+   * кладёт в запись цикла [40..41]. Смена этого номера при чтении = точка стыка
+   * журнала (время рестартовало). Именно marker-absence, а НЕ EVT_POWERLOSS:
+   * последний считается по RCC-флагам и растёт даже когда часы НЕ обнулялись
+   * (NRST/BOR при живом backup-домене). См. clock_epoch_seam_spec_v1.md. */
+  if (g_clockZeroed)
+    iflash_journal_append(EVT_CLOCKZERO, 0u, rcc);
+
   __HAL_RCC_CLEAR_RESET_FLAGS();
 }
 
@@ -737,7 +774,45 @@ static void ServiceClock_Config(void)
   osc.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
   osc.HSIState            = RCC_HSI_ON;
   osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  osc.PLL.PLLState        = RCC_PLL_NONE;   /* PLL не трогаем */
+  /* Разгон Сервиса до 80 МГц (26.07.2026): при входе в Service поднимаем
+   * PLL, весь сервисный режим работает на 80 МГц — флеш через QSPI можно
+   * гнать до 80 (реальная скорость чтения — параметр для потребителя).
+   * HSI(16)/M2 ×N20 /R2 = 80 МГц. Питание уже Scale1 (см. SystemClock_Config).
+   * ComInit() ниже переинитит UART под новую SystemCoreClock, связь 921600
+   * сохранится. Выход в «Работу» возвращает 16 МГц (WorkClock_Config). */
+  osc.PLL.PLLState        = RCC_PLL_ON;
+  osc.PLL.PLLSource       = RCC_PLLSOURCE_HSI;
+  osc.PLL.PLLM            = 2;
+  osc.PLL.PLLN            = 20;
+  osc.PLL.PLLR            = RCC_PLLR_DIV2;
+  osc.PLL.PLLP            = RCC_PLLP_DIV7;
+  osc.PLL.PLLQ            = RCC_PLLQ_DIV2;
+  if (HAL_RCC_OscConfig(&osc) != HAL_OK)
+    Error_Handler();
+
+  RCC_ClkInitTypeDef clk = {0};
+  clk.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
+                     | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  clk.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;   /* 80 МГц */
+  clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+  clk.APB1CLKDivider = RCC_HCLK_DIV1;
+  clk.APB2CLKDivider = RCC_HCLK_DIV1;
+  /* 80 МГц требует FLASH_LATENCY_4 (STM32L4 RM: 4 WS при Scale1 >64 МГц). */
+  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_4) != HAL_OK)
+    Error_Handler();
+}
+
+/* Штатный клок «Работы» — HCLK 16 МГц на HSI, PLL выключен (26.07.2026:
+ * выделено из прежнего ServiceClock_Config, который теперь разгоняет до 80).
+ * Возврат сюда при выходе Сервиса в «Работу» — рабочие энергорежимы и сон
+ * рассчитаны на 16 МГц/HSI, их не трогаем. */
+static void WorkClock_Config(void)
+{
+  RCC_OscInitTypeDef osc = {0};
+  osc.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
+  osc.HSIState            = RCC_HSI_ON;
+  osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  osc.PLL.PLLState        = RCC_PLL_NONE;   /* PLL не трогаем/выключаем */
   if (HAL_RCC_OscConfig(&osc) != HAL_OK)
     Error_Handler();
 
@@ -745,7 +820,7 @@ static void ServiceClock_Config(void)
   clk.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
                      | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   clk.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
-  clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* убираем /4: HCLK = 16 МГц */
+  clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* HCLK = 16 МГц */
   clk.APB1CLKDivider = RCC_HCLK_DIV1;
   clk.APB2CLKDivider = RCC_HCLK_DIV1;
   if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_0) != HAL_OK)
