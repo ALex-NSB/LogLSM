@@ -12,5 +12,6 @@
         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc*",
         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-g++*"
     ],
-    "claudeCodeChat.permissions.yoloMode": false
+    "claudeCodeChat.permissions.yoloMode": false,
+    "stm32cube-ide-core.configuration.productSTM32CubeMX.executablePath": "D:\\ST\\STM32Cube\\STM32CubeMX\\STM32CubeMX.exe"
 }

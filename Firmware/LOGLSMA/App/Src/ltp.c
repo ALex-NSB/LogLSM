@@ -4,7 +4,8 @@
  * Тест-вектор CRC: "123456789" -> 0x29B1.
  */
 #include "ltp.h"
-#include <string.h>
+/* ⚠ <string.h> сознательно НЕ подключаем: файл вторым экземпляром живёт в
+ * секции загрузчика, откуда libc недоступна (см. ltp_parser_init ниже). */
 
 /* ───────────────────────── CRC16-CCITT ─────────────────────────
  * poly=0x1021, init=0xFFFF, no reflect, xor=0 (спека §7) */
@@ -90,7 +91,13 @@ int ltp_build(uint8_t *out, size_t out_size,
 
 void ltp_parser_init(LtpParser *p)
 {
-  memset(p, 0, sizeof(*p));
+  /* Обнуление РУЧНЫМ циклом, а не memset (05.08.2026). Этот же файл вторым
+   * экземпляром компилируется в секцию загрузчика (ltp_boot.c → .bootsec), а
+   * оттуда обращаться к libc нельзя: она лежит в области приложения, которая
+   * во время заливки стёрта. Ценой одного цикла ltp.c не тянет libc вообще. */
+  uint8_t *q = (uint8_t *)p;
+  for (size_t i = 0; i < sizeof(*p); i++)
+    q[i] = 0;
   p->state = LTP_WAIT_FEND;
 }
 

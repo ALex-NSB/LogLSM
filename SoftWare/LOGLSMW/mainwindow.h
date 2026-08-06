@@ -34,6 +34,11 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    // Заголовок окна перекрашиваем сами: система гасит текст у неактивного
+    // окна до нечитаемого серого (06.08.2026, см. mainwindow.cpp).
+    void changeEvent(QEvent *e) override;
+
 private slots:
     void setServiceMode(bool on);
     void tickPcClock();
@@ -83,6 +88,47 @@ private:
     // первый же успешный ответ (пользователь перещёлкнул питание/тумблер)
     // снимает флаг в onResponse() и возвращает обычные опросы.
     bool m_regAwol = false;
+
+    // Индикатор связи — ТРИ состояния (06.08.2026). Раньше он был двухцветным и
+    // зеленел от самого факта открытого порта: подключён стенд — зелёно, хотя
+    // регистратор мог вообще не отвечать. Теперь зелёный только когда ответил
+    // САМ регистратор (0x8D), в том числе при прямом подключении без стенда.
+    //   0 — нет связи (порт закрыт)         красный
+    //   1 — порт открыт, регистратор молчит  жёлтый
+    //   2 — регистратор на связи             зелёный
+    void setLinkLed(int state);
+    bool m_regSeen = false;     // регистратор хоть раз ответил на этом порту
+
+    // Рабочая папка (06.08.2026) — ОДНА на все файлы программы: дампы данных,
+    // образы, журналы испытаний, дальше реестр приборов. Выбирается на вкладке
+    // «Настройки», запоминается между запусками. Раньше каждый путь жил своей
+    // жизнью: дампы уходили в исходники LOGLSMW, журнал стенда — в «Документы»,
+    // образы помнили последнюю папку сами по себе.
+    QString workDir() const;    // существующая папка (при нужде создаётся)
+    void    setupWorkDir();     // поле + кнопка «…» на «Настройках»
+
+    // ── Реестр приборов (06.08.2026), ТЗ actual/device_registry_spec_v1.md ──
+    // Учёт выпущенных приборов, НЕ резервная копия: паспорт и калибровки живут
+    // в приборе, здесь только запись «что и когда». Два CSV в рабочей папке,
+    // оба открываются в Excel без нашей программы — в этом и смысл.
+    //   index.csv  — по строке на прибор (номер, вариант, дата, версия ПО)
+    //   events.csv — только дозапись: что с прибором делали и когда
+    // Счётчик номеров отдельно НЕ хранится: следующий = максимум в index.csv+1,
+    // так его нельзя рассинхронизировать, скопировав папку на другой ПК.
+    QString regIndexPath() const;
+    QString regEventsPath() const;
+    int     regNextSerial() const;                  // следующий свободный номер
+    void    regEvent(const QString &serial, const QString &what,
+                     const QString &detail = QString());
+    void    regUpsertDevice(const QString &serial, const QString &variant,
+                            const QString &relDate, const QString &fw);
+    void    setupRegistry();
+    bool    m_passportPresent = false;   // в приборе уже есть паспорт (из PASSPORT_GET)
+    // Тип прибора определяет САМ прибор по WHO_AM_I датчика (06.08.2026):
+    // 0x6C = LSM6DSO = A, 0x70 = LSM6DSV320X = B. Руками не задаётся — поле
+    // «Тип» только показывает. В паспорт пишется именно этот код.
+    quint8  m_variantCode = 0x0A;
+    bool    m_variantFromSensor = false;
 
     // Серия «⚠ Страница» (02.07.2026): кнопка стирает spinMemPages страниц
     // подряд от spinMemStartPage (раньше — только одну стартовую, поле
@@ -668,6 +714,39 @@ private:
     void   speedCalHighlightRow(int row, bool on, int phase); // подсветка текущей ступени
     void   speedCalClearHighlight();
     bool   speedCalWrite(bool confirm, bool reread = true);   // записать коэффициенты измеренных узлов (0x32); reread=false — без переформатирующего чтения (в прогоне)
+    // Обновление прошивки STM32 по кабелю через свой загрузчик (05.08.2026).
+    // Договор — Firmware/LOGLSMA/App/Inc/boot.h; коды LTP 0x39..0x3D.
+    struct FwUpdate {
+        bool       running = false;
+        int        phase   = 0;      // 1 вход в загрузчик, 2 подтверждение, 3 стирание, 4 заливка, 5 сверка, 6 старт
+        QByteArray img;              // содержимое .bin, добито 0xFF до кратности 8
+        quint32    crc     = 0;      // CRC32 (zlib) по img
+        int        offset  = 0;      // сколько байт уже подтверждено прибором
+        int        lastChunk = 0;    // длина отправленного куска (последний может быть короче 256)
+        int        savedTimeoutMs = 500;   // таймаут DeviceController до заливки — вернуть в конце
+    } m_fw;
+    // Чтение внутренней Flash STM32 (05.08.2026) — диагностика на «FLASH STM».
+    // Страница 2 КБ приезжает восемью кусками по 256 Б (предел payload LTP).
+    struct IflashRead {
+        bool       running = false;
+        int        page    = 0;   // какую страницу читаем (0..127)
+        int        chunk   = 0;   // номер куска 0..7
+        QByteArray buf;           // накопленное
+    } m_iflash;
+    void iflashReadStart(int page);
+    void iflashReadNext();
+    void iflashHandle(const QByteArray &payload);
+    void iflashRender();
+
+    QTimer m_fwWaitTimer;                    // пауза на перезагрузку прибора в загрузчик
+    void   fwUpdateStart();                  // проверки файла + подтверждение + старт
+    void   fwUpdateSendNext();               // очередной BOOT_DATA
+    void   fwUpdateHandle(quint8 cmd, const QByteArray &payload);   // ответы 0x39..0x3D
+    // inLoader: остался ли прибор в загрузчике. От этого зависит подсказка —
+    // «нажмите Прошить ещё раз» уместно только если загрузчик там реально есть.
+    void   fwUpdateFinish(bool ok, const QString &why, bool inLoader = true);
+    static quint32 fwCrc32(const QByteArray &data);   // zlib CRC32 — тот же, что считает загрузчик
+
     void   rtcCalUpdateButtons(int state);   // 0 idle / 1 идёт выдержка / 2 расчёт готов — цвет кнопок RTC
     QTimer m_rtcApplyBlinkTimer;             // моргание «Применить» в состоянии «расчёт готов»
     bool   m_rtcApplyBlinkOn = false;

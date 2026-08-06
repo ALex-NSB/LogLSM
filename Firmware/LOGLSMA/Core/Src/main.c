@@ -124,8 +124,7 @@ static void ServiceStorageBootLog(void);    /* Стадия 1b: причина �
 uint8_t wkup1_pin_set(void)
 {
   return (GPIO_PIN_SET == HAL_GPIO_ReadPin(WKUP1_GPIO_Port, WKUP1_Pin));
-}
-/* USER CODE END 0 */
+}/* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
@@ -708,20 +707,23 @@ static void ServiceStorageBootLog(void)
    * ⚠ Если ST-Link настроен на АППАРАТНЫЙ reset (NRST без SFTRST) — перешивка
    * тоже посчитается; тогда переключить в IDE reset mode на «software system
    * reset» ЛИБО пересмотреть признак (по rccMask видно, что реально стоит). */
-  /* СЧЁТЧИК рестартов (стр.124..127) работает ВСЕГДА — инкрементируется на каждом
-   * реальном сбросе (в т.ч. «между жизнями» и при тестировании), сбрасывается
-   * «Сброс WDT». В ЗАПИСЬ журнала активаций (стр.121) число попадает только при
-   * событии активации/сохранения — а оно и так происходит лишь когда прибор
-   * активирован. Поэтому гейт на сам счётчик НЕ нужен (03.08.2026, по уточнению:
-   * «счётчик срабатывает/инкрементируется/сбрасывается, но не отражается в записи
-   * пока не активен» — за «запись» отвечает стр.121, а не гейт здесь). */
+  /* ГЕЙТ ПО АКТИВАЦИИ (03.08.2026): перезапуски пишем в журнал стр.124..127
+   * ТОЛЬКО когда прибор АКТИВИРОВАН (в поле, реальная эксплуатация). В сервисе/
+   * при провижне (не активирован) сбросы от перешивки/тумблера/тестов сторожа НЕ
+   * засоряют полевой счётчик. «Активирован» здесь = ОТКРЫТАЯ жизнь в журнале
+   * стр.121 (последнее событие = EVT_ACTIVATION) — читается из внутренней Flash
+   * без инициализации внешнего NOR (тот на раннем boot ещё не поднят). Нюанс:
+   * после «Очистить журналы» (стр.121 пуста) рестарты не пишутся до повторной
+   * активации — приемлемо (очистка = провижн). g_wakeCause не гейтим — он нужен
+   * recovery-логике независимо. */
+  const int bootActivated = (iflash_activation_last() != 0xFFFFFFFFu);
   if (rcc & 0x01u)
   {
-    iflash_journal_append(EVT_WATCHDOG, 0u, rcc);
+    if (bootActivated) iflash_journal_append(EVT_WATCHDOG, 0u, rcc);
   }
   else if (!(rcc & 0x08u))
   {
-    iflash_journal_append(EVT_POWERLOSS, 0u, rcc);
+    if (bootActivated) iflash_journal_append(EVT_POWERLOSS, 0u, rcc);
     g_wakeCause |= WAKE_POWERLOSS;
   }
   /* SFTRST (перешивка/программный reset) и Standby-выход (флаг SB, PWR) — не сбои,

@@ -29,6 +29,8 @@
 #include <QTextBlockFormat>
 #include <QTextCursor>
 #include <QTextStream>
+#include <QStringConverter>
+#include <QSet>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -74,6 +76,8 @@ constexpr quint32 TagActDump   = 14; // постраничное чтение о
 constexpr quint32 TagRtcCalStop = 15; // контрольное чтение времени при «Стоп» грубой калибровки RTC (03.08.2026)
 constexpr quint32 TagSpeedCal   = 16; // авто-калибровка скорости: опрос гироскопа на каждой ступени (03.08.2026)
 constexpr quint32 TagSyncCheck  = 17; // проверка опорной точки синхро на устройстве (backup) — состояние кнопок RTC (04.08.2026)
+constexpr quint32 TagFw         = 18; // обновление прошивки STM32 через загрузчик: 0x39..0x3D (05.08.2026)
+constexpr quint32 TagIflash     = 19; // чтение внутренней Flash STM32 (0x3E) — диагностика (05.08.2026)
 
 // Чувствительность LSM6DSO по факт. полной шкале (ACC_GET_FS/GYRO_GET_FS,
 // см. devicecontroller.h) — значения из лежащей в основе ST-библиотеки
@@ -190,10 +194,62 @@ struct MainWindow::ThemePalette {
 };
 
 
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Цвет заголовка окна (06.08.2026).
+ *
+ * Windows рисует заголовок НЕАКТИВНОГО окна серым по серому — версии прибора и
+ * программы в шапке становятся почти нечитаемы. Из Qt это не правится:
+ * заголовок рисует система. Но в Windows 11 есть DWM-атрибуты на цвет фона и
+ * текста заголовка, и заданные цвета система уже НЕ гасит при потере фокуса.
+ *
+ * Красим сами: активное окно — синее (как система и рисовала), неактивное —
+ * ЧЁРНОЕ, текст белый в обоих. Так шапка читается всегда, а какое окно
+ * активно, по-прежнему видно.
+ *
+ * Функция грузится динамически: на Windows 10 и старше атрибутов нет, вызов
+ * просто вернёт ошибку и заголовок останется системным. Ради этого не нужно
+ * ни линковать dwmapi, ни трогать сборку.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#ifdef Q_OS_WIN
+#include <windows.h>
+static void applyCaptionColors(WId winId, bool active)
+{
+    using SetAttr = HRESULT (WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+    static SetAttr setAttr = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (HMODULE dwm = LoadLibraryW(L"dwmapi.dll"))
+            setAttr = reinterpret_cast<SetAttr>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    }
+    if (!setAttr) return;
+
+    constexpr DWORD DWMWA_CAPTION_COLOR = 35;   // фон заголовка (Windows 11 22000+)
+    constexpr DWORD DWMWA_TEXT_COLOR    = 36;   // цвет текста заголовка
+    COLORREF caption = active ? RGB(0x00, 0x78, 0xD7)    // активное — синий
+                              : RGB(0x00, 0x00, 0x00);   // неактивное — чёрный
+    COLORREF text    = RGB(0xFF, 0xFF, 0xFF);            // текст белый всегда
+    HWND hwnd = reinterpret_cast<HWND>(winId);
+    setAttr(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    setAttr(hwnd, DWMWA_TEXT_COLOR,    &text,    sizeof(text));
+}
+#endif
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
 {
+#ifdef Q_OS_WIN
+    applyCaptionColors(winId(), true);   // читаемый заголовок в обоих состояниях
+    // ⚠ Одного changeEvent(ActivationChange) не хватило: на Windows окно его при
+    // уходе фокуса в другое ПРИЛОЖЕНИЕ не всегда получает, и заголовок оставался
+    // синим. Ловим состояние приложения целиком — это и есть нужный признак.
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState st) {
+                applyCaptionColors(winId(), st == Qt::ApplicationActive);
+            });
+#endif
     ui->setupUi(this);
 
     // Фиксированный размер окна (22.07.2026): раньше окно расширялось под
@@ -234,6 +290,8 @@ applyTheme(m_darkTheme);
     setupCore();
     setupStend();
     setupMonitor();
+    setupWorkDir();   // одна папка на дампы, образы и журналы (06.08.2026)
+    setupRegistry();  // учёт приборов в той же папке (06.08.2026)
     memTestUpdateUi();   // начальное состояние Факт — пустые ячейки
 
     // Сегменты активации = операции, ЗАПОЛНЯЕМ СЛЕВА НАПРАВО по мере готовности
@@ -357,7 +415,11 @@ applyTheme(m_darkTheme);
         // теста — это честнее, чем ложные «нет ответа».
         // m_stendNoReg: циклограмма-без-регистратора (03.07) — устройство в
         // Service и отвечает, опросы не подавляем.
-        if (!m_link->isOpen() || m_dev->busy() || m_imgActiveBtn
+        // m_fw.running (05.08.2026): идёт заливка прошивки — на линии загрузчик,
+        // он знает ровно 0x01/0x02/0x39..0x3D. Любой опрос часов/температур
+        // получил бы «неизвестная команда» и засорял журнал, а в очереди мешал
+        // бы потоку DATA. Часы замирают на время прошивки — так и надо.
+        if (!m_link->isOpen() || m_dev->busy() || m_imgActiveBtn || m_fw.running
             || (m_stendActive && !m_stendNoReg))
             return;
         // Регистратор пропал в режиме A (стоп не дошёл) — редкий PING вместо
@@ -762,6 +824,8 @@ void MainWindow::setupCore()
         QByteArray b; for (int i = 0; i < 4; ++i) b.append(char((u >> (8*i)) & 0xFF));
         requestCmd(LtpCmd::RTC_CALIB_SET, b, TagManual);
         appendLog(QStringLiteral("[TX] RTC_CALIB_SET %1 ppm").arg(m_rtcCalNewPpm, 0, 'f', 1));
+        regEvent(ui->editSerial->text().trimmed(), QStringLiteral("калибровка RTC"),
+                 QStringLiteral("%1 ppm").arg(m_rtcCalNewPpm, 0, 'f', 1));
         requestCmd(LtpCmd::RTC_CALIB_GET, {}, TagManual);   // контроль
         rtcCalUpdateButtons(0);   // применено → всё в исходное
         ui->lblRtcCalStatus->setText(QStringLiteral("Поправка применена. Для контроля прогоните ещё одну выдержку."));
@@ -803,8 +867,8 @@ void MainWindow::setupCore()
         { QSignalBlocker b(ui->tblSpeedCal);
           for (int i = 0; i < nn; ++i) {
               speedCalSetCell(i, 0, QString::number(nodes[i], 'f', 1), true);   // задано
-              speedCalSetCell(i, 1, QString(),                        true);    // измерено — пусто
-              speedCalSetCell(i, 2, QStringLiteral("1.000"),          false);   // текущий = 1
+              speedCalSetCell(i, 1, QString(),                        false);   // измерено — только прогон
+              speedCalSetCell(i, 2, QStringLiteral("1.000"),          false);   // текущий = что в приборе
               speedCalRecompute(i);
           } }
         appendLog(QStringLiteral("[Калибровка] шаблон: узлы, текущий=1 (не записано)"));
@@ -814,9 +878,26 @@ void MainWindow::setupCore()
     });
     // Ручная правка «Задано»/«Измерено» → пересчёт Δ% и «Коэфф. новый» в строке.
     connect(ui->tblSpeedCal, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
-        if (!it || (it->column() != 0 && it->column() != 1)) return;
-        QSignalBlocker b(ui->tblSpeedCal);
-        speedCalRecompute(it->row());
+        if (!it) return;
+        // Правка «Задано»/«Измерено» — пересчитать строку целиком.
+        if (it->column() == 0 || it->column() == 1) {
+            QSignalBlocker b(ui->tblSpeedCal);
+            speedCalRecompute(it->row());
+            return;
+        }
+        // Правка «Нового» (06.08.2026). Правят именно его: в прибор уходит
+        // ровно этот столбец. «Текущий» — это что в приборе СЕЙЧАС, его правка
+        // ничего никуда не отправит.
+        //
+        // ⚠ НИЧЕГО НЕ СЧИТАЕМ. Пробовали пересчитывать «Δ расч» под введённый
+        // коэффициент — убрано: это выглядит как предсказание остаточного
+        // отклонения, а предсказать его нельзя, следующее измерение выйдет
+        // другим (повторяемость замера гуляет на проценты). Просто гасим
+        // дельты: они относились к посчитанному коэффициенту, не к вашему.
+        if (it->column() == 4) {
+            QSignalBlocker b(ui->tblSpeedCal);
+            speedCalSetCell(it->row(), 5, QString(), false);   // Δ расч
+        }
     });
     // Авто-калибровка: кнопка-переключатель (Калибровать/Стоп) + таймер прохода.
     connect(ui->btnSpeedCalAuto, &QPushButton::clicked, this, [this] {
@@ -853,17 +934,11 @@ void MainWindow::setupCore()
     });
     connect(ui->btnDevInfoWrite, &QPushButton::clicked, this, [this] {
         if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-        // Дата — НЕОБЯЗАТЕЛЬНА (пустое поле = без даты). Но если что-то ВВЕДЕНО —
-        // формат обязателен ГГГГ-ММ-ДД: подсказываем и НЕ пишем, пока не исправят
-        // (тихо игнорировать ввод нельзя).
-        const QString dtxt = ui->editProdDate->text().trimmed();
-        const QDate date = QDate::fromString(dtxt, QStringLiteral("yyyy-MM-dd"));
-        if (!dtxt.isEmpty() && !date.isValid()) {
-            QMessageBox::warning(this, QStringLiteral("Дата выпуска"),
-                QStringLiteral("Дата должна быть в формате ГГГГ-ММ-ДД (например 2026-06-16).\n"
-                               "Либо оставьте поле пустым — паспорт запишется без даты."));
-            return;
-        }
+        // Дата выпуска = день паспортизации, то есть СЕГОДНЯ (06.08.2026).
+        // Поле с экрана убрано: вводить руками было нечего, а совпадение с
+        // датой записи в реестре делало его дублем. В самом приборе поле
+        // остаётся — это часть паспорта.
+        const QDate date = QDate::currentDate();
         if (QMessageBox::question(this, QStringLiteral("Запись паспорта"),
                 QStringLiteral("Записать паспорт?"))
             != QMessageBox::Yes) return;
@@ -875,24 +950,82 @@ void MainWindow::setupCore()
         const quint8  da = date.isValid() ? quint8(date.day())   : 0;
         QByteArray p;
         p.append(serial);                                       // [0..15] серийник
-        p.append(char(ui->cmbDevVariant->currentIndex() == 1 ? 0x0B : 0x0A));  // [16] вариант
+        p.append(char(m_variantCode));   // [16] вариант — из WHO_AM_I датчика, не с экрана
         p.append(char(y & 0xFF)); p.append(char((y >> 8) & 0xFF));             // [17..18] год LE
         p.append(char(mo));                                      // [19] месяц
         p.append(char(da));                                      // [20] день
+        // Повторная паспортизация (ТЗ реестра §5): паспорт — замороженный
+        // параметр, молча переписывать его нельзя. Пароля пока нет (отложен),
+        // поэтому просто подтверждение.
+        if (m_passportPresent &&
+            QMessageBox::question(this, QStringLiteral("Паспорт уже записан"),
+                QStringLiteral("В приборе уже есть паспорт. Перезаписать его?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            appendLog(QStringLiteral("Паспорт: перезапись отменена"));
+            return;
+        }
         requestCmd(LtpCmd::PASSPORT_SET, p, TagManual);
         appendLog(QStringLiteral("[TX] PASSPORT_SET: %1").arg(ui->editSerial->text().trimmed()));
         requestCmd(LtpCmd::PASSPORT_GET, {}, TagManual);         // контрольное чтение
     });
 
     connect(ui->btnFwBrowse, &QPushButton::clicked, this, [this] {
+        // Куда открывать диалог. По умолчанию Qt открывает каталог СВОЕЙ сборки
+        // (Desktop_Qt_..._Debug) — там прошивки нет и не будет, каждый раз
+        // пришлось бы идти через полдерева. Подставляем сразу ФАЙЛ, а не папку:
+        // тогда образ виден и выбран, достаточно нажать «Открыть». По порядку:
+        //   1. уже выбранный файл (обычный повторный заход);
+        //   2. запомненный с прошлого раза;
+        //   3. свежая сборка прошивки рядом с исходниками LOGLSMW.
+        QSettings st(kOrg, kApp);
+        QString start = ui->editFwFile->text().trimmed();
+        if (start.isEmpty() || !QFileInfo::exists(start))
+            start = st.value(QStringLiteral("fwFile")).toString();
+        if (start.isEmpty() || !QFileInfo::exists(start)) {
+            start.clear();
+#ifdef LOGLSMW_SRC_DIR
+            // SoftWare/LOGLSMW → ../../Firmware/LOGLSMA/build/<конфигурация>
+            const QString fw = QDir(QStringLiteral(LOGLSMW_SRC_DIR "/../../Firmware/LOGLSMA/build"))
+                                   .absolutePath();
+            for (const QString &cfg : { QStringLiteral("Debug"), QStringLiteral("Release") }) {
+                QDir d(fw + QLatin1Char('/') + cfg);
+                if (!d.exists()) continue;
+                // Имя образа обновления несёт версию (UpLSMA_ГГ.ММ.ДД_ЧЧ.ММ.bin),
+                // поэтому ищем по маске и берём самый свежий. Заодно понимаем
+                // старое имя LOGLSMA.bin — вдруг рядом лежит от прошлых сборок.
+                const auto found = d.entryInfoList(
+                    { QStringLiteral("UpLSMA*.bin"), QStringLiteral("LOGLSMA.bin") },
+                    QDir::Files, QDir::Time);
+                if (!found.isEmpty()) { start = found.first().absoluteFilePath(); break; }
+                if (start.isEmpty()) start = d.absolutePath();                 // хотя бы папка
+            }
+#endif
+        }
+
         const QString fn = QFileDialog::getOpenFileName(this,
-            QStringLiteral("Файл прошивки STM32"), QString(),
-            QStringLiteral("Прошивка (*.bin);;Все файлы (*)"));
-        if (!fn.isEmpty()) ui->editFwFile->setText(fn);
+            QStringLiteral("Файл прошивки STM32"), start,
+            QStringLiteral("Образ обновления (UpLSMA*.bin);;Двоичный образ (*.bin);;Все файлы (*)"));
+        if (!fn.isEmpty()) {
+            ui->editFwFile->setText(fn);
+            st.setValue(QStringLiteral("fwFile"), fn);
+        }
     });
-    connect(ui->btnFwUpdate, &QPushButton::clicked, this, [this] {
-        if (ui->editFwFile->text().isEmpty()) { appendLog(QStringLiteral("⚠ Сначала выберите файл прошивки")); return; }
-        appendLog(QStringLiteral("⚠ Обновление ПО STM32 — в разработке (нужен бутлоадер: приём образа по LTP + запись во внутр. Flash)"));
+    connect(ui->btnFwUpdate, &QPushButton::clicked, this, [this] { fwUpdateStart(); });
+
+    // Чтение внутренней Flash: своя страница + кнопки-закладки на интересные.
+    connect(ui->btnIflashRead, &QPushButton::clicked, this,
+            [this] { iflashReadStart(ui->spinIflashPage->value()); });
+    connect(ui->btnIflashBoot, &QPushButton::clicked, this, [this] { iflashReadStart(113); });
+    connect(ui->btnIflashAct,  &QPushButton::clicked, this, [this] { iflashReadStart(121); });
+    connect(ui->btnIflashCfg,  &QPushButton::clicked, this, [this] { iflashReadStart(123); });
+    connect(ui->btnIflashJrn,  &QPushButton::clicked, this, [this] { iflashReadStart(124); });
+    // Пауза после команды «уйти в загрузчик»: прибор отвечает, потом сбрасывается.
+    // Спросить его раньше, чем он поднимется, = гарантированный ложный таймаут.
+    m_fwWaitTimer.setSingleShot(true);
+    connect(&m_fwWaitTimer, &QTimer::timeout, this, [this] {
+        if (!m_fw.running) return;
+        m_fw.phase = 2;                       // подтверждение: кто на линии?
+        requestCmd(LtpCmd::BOOT_ENTER, {}, TagFw);
     });
 
     // Скорость: последняя использованная, стартовый default 921600 — штатная
@@ -1256,7 +1389,7 @@ void MainWindow::setupCore()
 
         QSettings st(kOrg, kApp);
         const QString lastDir = st.value(QStringLiteral("memtest/lastImgDir"),
-                                          QStringLiteral("actual/test_dumps")).toString();
+                                          workDir()).toString();
         const QString defaultPath = QDir(lastDir).filePath(suggestedFile);
         const QString path = QFileDialog::getOpenFileName(
             this, caption, defaultPath,
@@ -1532,7 +1665,7 @@ void MainWindow::speedCalRecompute(int row)
     double cur = txt(2).toDouble(); if (cur <= 0.0) cur = 1.0;   // текущий (кол.2, дефолт 1)
     if (mtxt.isEmpty() || meas <= 0.0 || given <= 0.0) {         // нет измерения → пусто
         speedCalSetCell(row, 3, QString(), false);   // Δ изм
-        speedCalSetCell(row, 4, QString(), false);   // новый
+        speedCalSetCell(row, 4, QString(), true);    // новый — пусто, но правится руками
         speedCalSetCell(row, 5, QString(), false);   // Δ расч
         return;
     }
@@ -1541,7 +1674,10 @@ void MainWindow::speedCalRecompute(int row)
     const double raw  = meas / cur;                             // сырое = измерено/текущий
     const double drasch = (raw * koef - given) / given * 100.0; // Δ расч: остаточное с НОВЫМ коэфф (≈0 = минимум)
     speedCalSetCell(row, 3, QString::number(dizm,   'f', 1), false);
-    speedCalSetCell(row, 4, QString::number(koef,   'f', 3), false);
+    // ⚠ «Новый» РЕДАКТИРУЕМЫЙ (06.08.2026): в прибор уходит именно этот
+    // столбец, значит он и есть то, что задаёшь. Прогон просто подставляет
+    // сюда своё значение, но его можно поправить или вписать без прогона.
+    speedCalSetCell(row, 4, QString::number(koef,   'f', 3), true);
     speedCalSetCell(row, 5, QString::number(drasch, 'f', 1), false);
 }
 
@@ -1551,7 +1687,7 @@ void MainWindow::speedCalSetRow(int row, double given, double measured, double w
 {
     QSignalBlocker b(ui->tblSpeedCal);
     speedCalSetCell(row, 0, QString::number(given,    'f', 1), true);
-    speedCalSetCell(row, 1, QString::number(measured, 'f', 1), true);
+    speedCalSetCell(row, 1, QString::number(measured, 'f', 1), false);  // измерено — только прогон
     speedCalSetCell(row, 2, QString::number(workKoef, 'f', 3), false);   // текущий
     speedCalRecompute(row);
 }
@@ -1566,13 +1702,30 @@ bool MainWindow::speedCalWrite(bool confirm, bool reread)
     for (int i = 0; i < rc; ++i) {
         auto cell = [this,i](int c){ auto*it=ui->tblSpeedCal->item(i,c); return it?it->text().trimmed():QString(); };
         const QString mtxt = cell(1);
-        if (mtxt.isEmpty()) continue;                   // не измерена — пропуск
-        bool okM=false, okK=false;
-        const float meas = mtxt.toFloat(&okM);
-        const float newk = cell(4).toFloat(&okK);
+        const QString ktxt = cell(4);
+        if (ktxt.isEmpty()) continue;                   // коэффициента нет — писать нечего
+
+        bool okK=false;
+        const float newk = ktxt.toFloat(&okK);
+        if (!okK || newk <= 0.f) { appendLog(QStringLiteral("⚠ Строка %1: битый коэффициент").arg(i+1)); return false; }
+
         float cur = cell(2).toFloat(); if (cur <= 0.f) cur = 1.f;
-        if (!okM || !okK) { appendLog(QStringLiteral("⚠ Строка %1: битые измерение/коэффициент").arg(i+1)); return false; }
-        const float r = meas / cur;                     // сырое = измерено/текущий (ключ интерполяции)
+        const float given = cell(0).toFloat();
+
+        float r;
+        if (mtxt.isEmpty()) {
+            // Прогона не было, коэффициент вписан руками (06.08.2026) — перенос
+            // из журнала, повтор на другом приборе, правка одного узла. Ключ
+            // интерполяции выводим из определения k = задано/сырое, то есть
+            // сырое = задано/k: узел получается тот же, что дал бы прогон.
+            if (given <= 0.f) { appendLog(QStringLiteral("⚠ Строка %1: коэффициент есть, а скорость — нет").arg(i+1)); return false; }
+            r = given / newk;
+        } else {
+            bool okM=false;
+            const float meas = mtxt.toFloat(&okM);
+            if (!okM || meas <= 0.f) { appendLog(QStringLiteral("⚠ Строка %1: битое измерение").arg(i+1)); return false; }
+            r = meas / cur;                             // сырое = измерено/текущий (ключ интерполяции)
+        }
         if (r <= prevR) { appendLog(QStringLiteral("⚠ скорость должна строго возрастать (строка %1)").arg(i+1)); return false; }
         prevR = r;
         for (int b=0;b<4;++b) body.append(char((*reinterpret_cast<const quint32*>(&r)    >> (8*b)) & 0xFF));
@@ -1586,6 +1739,20 @@ bool MainWindow::speedCalWrite(bool confirm, bool reread)
     QByteArray p; p.append(char(cnt)); p.append(body);
     requestCmd(LtpCmd::SPEED_CAL_SET, p, TagManual);
     appendLog(QStringLiteral("[TX] SPEED_CAL_SET: %1 узлов").arg(cnt));
+
+    // Реестр (06.08.2026): узлы пишем в журнал ЧИСЛАМИ — «задано=коэффициент».
+    // Ровно в том виде, в каком их можно перепечатать обратно в таблицу, если
+    // прибор придётся калибровать заново после стирания стр.123.
+    {
+        QStringList nodes;
+        for (int i = 0; i < rc; ++i) {
+            auto cell = [this,i](int c){ auto*it=ui->tblSpeedCal->item(i,c); return it?it->text().trimmed():QString(); };
+            if (cell(4).isEmpty()) continue;
+            nodes << QStringLiteral("%1=%2").arg(cell(0), cell(4));
+        }
+        regEvent(ui->editSerial->text().trimmed(), QStringLiteral("калибровка скорости"),
+                 nodes.join(QStringLiteral(" ")));
+    }
     if (reread)
         requestCmd(LtpCmd::SPEED_CAL_GET, {}, TagManual);   // контрольное чтение (текущий←новый)
     return true;
@@ -1684,7 +1851,7 @@ void MainWindow::speedCalAutoTick()
       auto *ic = ui->tblSpeedCal->item(row, 2);         // текущий (кол.2)
       double cur = ic ? ic->text().trimmed().toDouble() : 0.0; if (cur <= 0.0) cur = 1.0;
       const double meas = raw * cur;                    // измерено = сырое × текущий
-      speedCalSetCell(row, 1, QString::number(meas, 'f', 1), true);
+      speedCalSetCell(row, 1, QString::number(meas, 'f', 1), false);
       speedCalRecompute(row); }
     appendLog(QStringLiteral("[Калибровка] ступень %1/%2: сырое %3 об/мин (%4 выборок, усеч.)")
                   .arg(idx+1).arg(m_speedCal.targets.size()).arg(raw, 0, 'f', 1).arg(m_speedCal.samples.size()));
@@ -1774,6 +1941,417 @@ void MainWindow::speedCalClearHighlight()
     for (int r = 0; r < ui->tblSpeedCal->rowCount(); ++r)
         for (int c = 0; c < ui->tblSpeedCal->columnCount(); ++c)
             if (auto *it = ui->tblSpeedCal->item(r, c)) it->setBackground(QBrush());
+}
+
+/* =====================================================================
+ *  ОБНОВЛЕНИЕ ПРОШИВКИ STM32 ПО КАБЕЛЮ (05.08.2026)
+ *
+ *  Порядок: 0x39 приложению → оно отвечает и ПРЫГАЕТ в загрузчик (без сброса:
+ *  загрузчик лежит наверху Flash и вектором сброса не владеет) → короткая
+ *  пауза → 0x39 ещё раз (теперь отвечает загрузчик, метка 0xB0) →
+ *  0x3A BEGIN (размер+CRC, стирание — ответ ДОЛГИЙ) → 0x3B DATA по 256 Б →
+ *  0x3C END (загрузчик сверяет CRC по записанной Flash) → 0x3D GO (сброс,
+ *  стартует новое приложение).
+ *
+ *  Обрыв заливки не страшен: прибор остаётся в загрузчике, повторное «Прошить»
+ *  продолжает с нуля. Единственное чувствительное место — первая страница
+ *  образа (вектора приложения), поэтому она уходит ПОСЛЕДНЕЙ, см.
+ *  fwUpdateSendNext. Договор целиком — Firmware/LOGLSMA/App/Inc/boot.h.
+ * ===================================================================== */
+
+/* =====================================================================
+ *  ЧТЕНИЕ ВНУТРЕННЕЙ FLASH STM32 (05.08.2026) — диагностика
+ *
+ *  ⚠ Не путать с «Тестом памяти»: там ВНЕШНИЙ NOR (чип данных, страница
+ *  256 Б). Здесь память самого МК — страница 2 КБ, и в ней лежит всё
+ *  интересное: код приложения (стр.0..112), секция загрузчика (113..120),
+ *  журнал активаций (121), паспорт с калибровками (123), журнал рестартов
+ *  (124..127). Раньше посмотреть это можно было только программатором.
+ *
+ *  Страница приезжает восемью кусками по 256 Б — больше в payload LTP не
+ *  влезает. Только чтение: записи по этому пути нет.
+ * ===================================================================== */
+void MainWindow::iflashReadStart(int page)
+{
+    if (m_iflash.running) return;
+    if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Внутр. Flash: нет связи")); return; }
+
+    m_iflash.running = true;
+    m_iflash.page    = page;
+    m_iflash.chunk   = 0;
+    m_iflash.buf.clear();
+    ui->spinIflashPage->setValue(page);
+    ui->lblIflashAddr->setText(QStringLiteral("0x%1 — чтение…")
+                                   .arg(0x08000000u + quint32(page) * 2048u, 8, 16, QLatin1Char('0')));
+    iflashReadNext();
+}
+
+void MainWindow::iflashReadNext()
+{
+    const quint32 addr = 0x08000000u + quint32(m_iflash.page) * 2048u
+                       + quint32(m_iflash.chunk) * 256u;
+    const quint16 len  = 256;
+    QByteArray p;
+    for (int i = 0; i < 4; ++i) p.append(char((addr >> (8 * i)) & 0xFF));
+    p.append(char(len & 0xFF));
+    p.append(char((len >> 8) & 0xFF));
+    requestCmd(LtpCmd::IFLASH_READ, p, TagIflash);
+}
+
+void MainWindow::iflashHandle(const QByteArray &payload)
+{
+    if (!m_iflash.running) return;
+    if (payload.isEmpty() || quint8(payload[0]) != 0) {
+        m_iflash.running = false;
+        ui->lblIflashAddr->setText(QStringLiteral("ошибка чтения"));
+        appendLog(QStringLiteral("⚠ Внутр. Flash: прибор отказал (код %1)")
+                      .arg(payload.isEmpty() ? -1 : int(quint8(payload[0]))));
+        return;
+    }
+    m_iflash.buf.append(payload.mid(1));
+
+    if (++m_iflash.chunk < 8) { iflashReadNext(); return; }
+
+    m_iflash.running = false;
+    iflashRender();
+}
+
+void MainWindow::iflashRender()
+{
+    const quint32 base = 0x08000000u + quint32(m_iflash.page) * 2048u;
+    const QByteArray &b = m_iflash.buf;
+
+    // Подпись страницы: сразу видно, на что смотришь, без сверки с картой.
+    QString what;
+    const int pg = m_iflash.page;
+    if (pg <= 112)                     what = QStringLiteral("приложение");
+    else if (pg <= 120)                what = QStringLiteral("загрузчик (.bootsec)");
+    else if (pg == 121)                what = QStringLiteral("журнал активаций");
+    else if (pg == 122)                what = QStringLiteral("свободна");
+    else if (pg == 123)                what = QStringLiteral("паспорт + калибровки");
+    else                               what = QStringLiteral("журнал рестартов");
+
+    ui->lblIflashAddr->setText(QStringLiteral("0x%1 · стр.%2 · %3")
+                                   .arg(base, 8, 16, QLatin1Char('0')).arg(pg).arg(what));
+
+    QString out;
+    out.reserve(b.size() * 4);
+    for (int off = 0; off < b.size(); off += 16) {
+        QString hex, txt;
+        for (int i = 0; i < 16 && off + i < b.size(); ++i) {
+            const quint8 v = quint8(b[off + i]);
+            hex += QStringLiteral("%1 ").arg(v, 2, 16, QLatin1Char('0')).toUpper();
+            txt += (v >= 0x20 && v < 0x7F) ? QChar(v) : QChar('.');
+            if (i == 7) hex += QLatin1Char(' ');
+        }
+        out += QStringLiteral("%1  %2 %3\n")
+                   .arg(base + quint32(off), 8, 16, QLatin1Char('0'))
+                   .arg(hex, -50)
+                   .arg(txt);
+    }
+
+    // Первое слово секции загрузчика — указатель на точку входа. Проверяем
+    // прямо здесь: это ровно то, ради чего окно и делалось.
+    if (pg == 113 && b.size() >= 4) {
+        const quint32 entry = quint32(quint8(b[0])) | (quint32(quint8(b[1])) << 8)
+                            | (quint32(quint8(b[2])) << 16) | (quint32(quint8(b[3])) << 24);
+        const bool ok = (entry >= 0x08038800u) && (entry < 0x0803C800u) && (entry & 1u);
+        out.prepend(QStringLiteral("Точка входа загрузчика: 0x%1 — %2\n\n")
+                        .arg(entry, 8, 16, QLatin1Char('0'))
+                        .arg(ok ? QStringLiteral("верна")
+                                : QStringLiteral("НЕВЕРНА (загрузчик не прошит?)")));
+    }
+
+    ui->iflashDump->setPlainText(out);
+}
+
+/* CRC32 из zlib (poly 0xEDB88320, init/xor 0xFFFFFFFF) — ровно то, что считает
+ * загрузчик. Побитно: файл — сотня килобайт, таблица ради этого не нужна. */
+quint32 MainWindow::fwCrc32(const QByteArray &data)
+{
+    quint32 crc = 0xFFFFFFFFu;
+    for (char ch : data) {
+        crc ^= quint8(ch);
+        for (int b = 0; b < 8; ++b)
+            crc = (crc >> 1) ^ (0xEDB88320u & quint32(-qint32(crc & 1u)));
+    }
+    return ~crc;
+}
+
+void MainWindow::fwUpdateStart()
+{
+    if (m_fw.running) {          // кнопка работает и как «отмена»
+        fwUpdateFinish(false, QStringLiteral("Отменено оператором."), m_fw.phase >= 2);
+        return;
+    }
+    if (ui->editFwFile->text().isEmpty()) {
+        appendLog(QStringLiteral("⚠ Сначала выберите файл прошивки"));
+        return;
+    }
+    if (!m_link->isOpen()) {
+        appendLog(QStringLiteral("⚠ Прошивка: нет связи с прибором"));
+        return;
+    }
+
+    QFile f(ui->editFwFile->text());
+    if (!f.open(QIODevice::ReadOnly)) {
+        appendLog(QStringLiteral("⚠ Прошивка: не открывается файл %1").arg(f.fileName()));
+        return;
+    }
+    QByteArray img = f.readAll();
+    f.close();
+
+    // Область приложения — стр.8..120 внутренней Flash (см. boot.h)
+    constexpr int kAppMax = 113 * 2048;
+    if (img.isEmpty() || img.size() > kAppMax) {
+        appendLog(QStringLiteral("⚠ Прошивка: неподходящий размер %1 Б (допустимо 1..%2)")
+                      .arg(img.size()).arg(kAppMax));
+        return;
+    }
+
+    // Дешёвая проверка «тот ли это файл» вместо заголовка в образе: первые
+    // 8 байт .bin — вектор сброса. Начальный SP обязан смотреть в ОЗУ, адрес
+    // Reset_Handler — внутрь области приложения (0x08000000..+226 КБ). Голый
+    // мусор и образ от другого МК отсекаются здесь же.
+    const auto le32 = [&img](int i) {
+        return quint32(quint8(img[i])) | (quint32(quint8(img[i + 1])) << 8)
+             | (quint32(quint8(img[i + 2])) << 16) | (quint32(quint8(img[i + 3])) << 24);
+    };
+    const quint32 sp = le32(0), pc = le32(4);
+    if (sp < 0x20000000u || sp > 0x2000C000u) {
+        appendLog(QStringLiteral("⚠ Прошивка: не похоже на образ LOGLSMA — начальный стек 0x%1 вне ОЗУ")
+                      .arg(sp, 8, 16, QLatin1Char('0')));
+        return;
+    }
+    if (pc < 0x08000000u || pc >= quint32(0x08000000u + kAppMax)) {
+        appendLog(QStringLiteral("⚠ Прошивка: вектор сброса 0x%1 вне области приложения "
+                                 "(образ слинкован не на 0x08000000?)")
+                      .arg(pc, 8, 16, QLatin1Char('0')));
+        return;
+    }
+
+    // Flash L4 пишется двойными словами — добиваем хвост до кратности 8.
+    // 0xFF (а не 0x00): это «стёртое» состояние, дешевле для чипа.
+    while (img.size() % 8) img.append(char(0xFF));
+
+    // Кнопки задаём вручную: стандартные Yes/No у Qt остаются английскими,
+    // русский перевод в сборку не подключён.
+    QMessageBox ask(this);
+    ask.setIcon(QMessageBox::Question);
+    ask.setWindowTitle(QStringLiteral("Обновление прошивки"));
+    ask.setText(QStringLiteral("Залить %1\nв прибор (%2 КБ)?")
+                    .arg(QFileInfo(ui->editFwFile->text()).fileName())
+                    .arg(img.size() / 1024.0, 0, 'f', 1));
+    ask.setInformativeText(QStringLiteral(
+        "Приложение отдаст управление загрузчику и на время заливки перестанет "
+        "отвечать на обычные команды.\n"
+        "Обрыв не опасен — прошивку можно залить заново."));
+    QPushButton *btnGo = ask.addButton(QStringLiteral("Прошить"), QMessageBox::AcceptRole);
+    ask.addButton(QStringLiteral("Отмена"), QMessageBox::RejectRole);
+    ask.setDefaultButton(btnGo);
+    ask.exec();
+    if (ask.clickedButton() != btnGo)
+        return;
+
+    m_fw.running = true;
+    m_fw.img     = img;
+    m_fw.crc     = fwCrc32(img);
+    m_fw.offset  = 0;
+    m_fw.phase   = 1;
+    m_fw.savedTimeoutMs = ui->spinTimeout->value();
+
+    ui->barFwUpdate->setRange(0, img.size());
+    ui->barFwUpdate->setValue(0);
+    ui->btnFwUpdate->setText(QStringLiteral("Стоп"));
+    ui->lblFwUpdateNote->setText(QStringLiteral("Перевожу прибор в загрузчик…"));
+    appendLog(QStringLiteral("Прошивка: %1 Б, CRC32 %2 — перевожу прибор в загрузчик")
+                  .arg(img.size()).arg(m_fw.crc, 8, 16, QLatin1Char('0')));
+
+    requestCmd(LtpCmd::BOOT_ENTER, {}, TagFw);
+}
+
+/* ⚠ ПОРЯДОК ОТПРАВКИ. Первая страница образа (2 КБ) — таблица векторов
+ * работающего приложения. Пока она стёрта, прибор не поднимется после снятия
+ * питания, и лечить это пришлось бы по SWD. Поэтому шлём её ПОСЛЕДНЕЙ: сначала
+ * всё, что с 2048, затем начало. Загрузчик со своей стороны так же оставляет
+ * стр.0 нестёртой до первого пакета с началом образа. Итог: опасное окно —
+ * стирание одной страницы плюс восемь пакетов, а не вся заливка. */
+void MainWindow::fwUpdateSendNext()
+{
+    if (!m_fw.running) return;
+
+    constexpr int kPage = 2048;                 // страница внутренней Flash
+    const int total = m_fw.img.size();
+    const int tailStart = qMin(kPage, total);   // граница «хвост | первая страница»
+
+    int off;
+    if (m_fw.offset < total - tailStart) {      // ещё идёт хвост (с 2048 и дальше)
+        off = tailStart + m_fw.offset;
+    } else if (m_fw.offset < total) {           // хвост кончился — добиваем начало
+        off = m_fw.offset - (total - tailStart);
+    } else {                                    // всё отдано — на сверку
+        m_fw.phase = 5;
+        ui->lblFwUpdateNote->setText(QStringLiteral("Сверка CRC в приборе…"));
+        requestCmd(LtpCmd::BOOT_END, {}, TagFw);
+        return;
+    }
+
+    // Хвост может кончиться неполным куском (образ кратен 8, но не 256) —
+    // считаем ровно до его границы, иначе следующий кусок «съел» бы начало
+    // первой страницы. Отсюда же lastChunk: шагать по 256 вслепую нельзя.
+    const int limit = (off >= tailStart) ? total : tailStart;
+    const int n = qMin(int(LtpCmd::BOOT_CHUNK), limit - off);
+
+    QByteArray p;
+    p.append(char(off & 0xFF));  p.append(char((off >> 8) & 0xFF));
+    p.append(char((off >> 16) & 0xFF)); p.append(char((off >> 24) & 0xFF));
+    p.append(m_fw.img.mid(off, n));
+    m_fw.lastChunk = n;
+    requestCmd(LtpCmd::BOOT_DATA, p, TagFw);
+}
+
+void MainWindow::fwUpdateHandle(quint8 cmd, const QByteArray &payload)
+{
+    if (!m_fw.running) return;
+
+    const auto code = [&payload]() -> int {
+        return payload.isEmpty() ? -1 : int(quint8(payload[0]));
+    };
+    // Расшифровка кодов ошибок загрузчика (boot.h). Держать в одном порядке!
+    const auto errText = [](int c) {
+        switch (c) {
+        case 1:  return QStringLiteral("Недопустимый размер образа.");
+        case 2:  return QStringLiteral("Ошибка стирания Flash.");
+        case 3:  return QStringLiteral("Ошибка записи Flash.");
+        case 4:  return QStringLiteral("Нарушен порядок пакетов.");
+        case 5:  return QStringLiteral("CRC записанного образа не сошёлся.");
+        case 6:  return QStringLiteral("Образ принят не полностью.");
+        default: return QStringLiteral("Код ошибки %1.").arg(c);
+        }
+    };
+
+    switch (cmd) {
+
+    case LtpCmd::BOOT_ENTER:
+        // Кто ответил, видно по первому байту: загрузчик ставит метку 0xB0,
+        // приложение — код ошибки (0 = принял, уходит прыжком). Поэтому
+        // повторный запуск после сорвавшейся заливки (прибор УЖЕ в загрузчике)
+        // не ждёт лишнюю паузу, а продолжает сразу.
+        if (m_fw.phase == 1 && code() != LtpCmd::BOOT_WHOAMI_MARK) {
+            if (code() != 0) {       // приложение отказалось передавать управление
+                fwUpdateFinish(false, QStringLiteral(
+                    "Прибор не принял команду (код %1). Возможно, версия без "
+                    "загрузчика.").arg(code()),
+                    false);   // прибор работает штатно, загрузчика в нём нет
+                return;
+            }
+            // Прыжок без сброса: загрузчик поднимает свой клок и UART за
+            // единицы миллисекунд. Пауза с запасом, но короткая.
+            appendLog(QStringLiteral("Прошивка: приложение отдало управление загрузчику…"));
+            m_fwWaitTimer.start(400);
+            return;
+        }
+        if (code() != LtpCmd::BOOT_WHOAMI_MARK) {
+            fwUpdateFinish(false,
+                QStringLiteral("Ответ пришёл не от загрузчика."), false);
+            return;
+        }
+        if (payload.size() >= 6) {
+            appendLog(QStringLiteral("Прошивка: на связи загрузчик, версия %1.%2.%3 %4:%5")
+                          .arg(quint8(payload[1]), 2, 10, QLatin1Char('0'))
+                          .arg(quint8(payload[2]), 2, 10, QLatin1Char('0'))
+                          .arg(quint8(payload[3]), 2, 10, QLatin1Char('0'))
+                          .arg(quint8(payload[4]), 2, 10, QLatin1Char('0'))
+                          .arg(quint8(payload[5]), 2, 10, QLatin1Char('0')));
+        }
+        {
+            // Стирание области приложения — единственный ДОЛГИЙ ответ во всём
+            // обмене (страница ~22 мс, их до сотни). Штатные 500 мс тут дают
+            // ложный таймаут, поэтому на время заливки поднимаем окно.
+            m_dev->setTimeout(15000);
+            m_fw.phase = 3;
+            ui->lblFwUpdateNote->setText(QStringLiteral("Стирание области приложения…"));
+            const quint32 sz = quint32(m_fw.img.size()), crc = m_fw.crc;
+            QByteArray p;
+            for (int i = 0; i < 4; ++i) p.append(char((sz  >> (8 * i)) & 0xFF));
+            for (int i = 0; i < 4; ++i) p.append(char((crc >> (8 * i)) & 0xFF));
+            requestCmd(LtpCmd::BOOT_BEGIN, p, TagFw);
+        }
+        return;
+
+    case LtpCmd::BOOT_BEGIN:
+        if (code() != 0) { fwUpdateFinish(false, errText(code())); return; }
+        m_dev->setTimeout(2000);       // дальше ответы быстрые, но с запасом
+        m_fw.phase = 4;
+        ui->lblFwUpdateNote->setText(QStringLiteral("Заливка образа…"));
+        fwUpdateSendNext();
+        return;
+
+    case LtpCmd::BOOT_DATA:
+        if (code() != 0) { fwUpdateFinish(false, errText(code())); return; }
+        m_fw.offset = qMin(m_fw.offset + m_fw.lastChunk, m_fw.img.size());
+        ui->barFwUpdate->setValue(m_fw.offset);
+        fwUpdateSendNext();
+        return;
+
+    case LtpCmd::BOOT_END:
+        if (code() != 0) { fwUpdateFinish(false, errText(code())); return; }
+
+        /* Главное уже позади: образ записан и прибор сам сверил CRC. Осталось
+         * скомандовать «стартуй» — и вот тут ответа МЫ НЕ ЖДЁМ. Прибор
+         * отвечает на GO и в ту же миллисекунду уходит в сброс: успел ответ
+         * дойти или нет — вопрос гонки, а не успеха. Раньше из-за этого
+         * заливка «зависала» на 100 % с кнопкой «Стоп», хотя всё прошло.
+         * Поэтому: закрываем операцию как успешную сразу, а факт запуска
+         * проверяем нормальным способом — перечитываем версию прибора. */
+        appendLog(QStringLiteral("Прошивка: образ записан и сверен, запускаю"));
+        // Реестр (06.08.2026): отмечаем, когда и чем обновляли — по имени файла
+        // видна залитая версия (UpLSMA_ГГ.ММ.ДД_ЧЧ.ММ.bin). В серии прошивка
+        // одна, и «версия ПО» в index.txt — факт о приборе; журнал нужен для
+        // отладочных перешивок, когда версия за день меняется не раз.
+        regEvent(ui->editSerial->text().trimmed(), QStringLiteral("прошивка обновлена"),
+                 QFileInfo(ui->editFwFile->text()).fileName());
+        requestCmd(LtpCmd::BOOT_GO, {}, TagFw);
+        fwUpdateFinish(true, QString());
+        QTimer::singleShot(2500, this, [this] {
+            if (m_link->isOpen()) requestCmd(LtpCmd::WHO_AM_I, {}, TagManual);
+        });
+        return;
+
+    case LtpCmd::BOOT_GO:
+        return;                     /* ответ, если успел прийти, уже не нужен */
+
+    default:
+        return;
+    }
+}
+
+void MainWindow::fwUpdateFinish(bool ok, const QString &why, bool inLoader)
+{
+    if (!m_fw.running) return;
+    m_fw.running = false;
+    m_fw.phase   = 0;
+    m_fwWaitTimer.stop();
+    m_dev->setTimeout(m_fw.savedTimeoutMs);
+    m_fw.img.clear();
+
+    ui->btnFwUpdate->setText(QStringLiteral("Прошить"));
+    if (ok) {
+        ui->barFwUpdate->setValue(ui->barFwUpdate->maximum());
+        ui->lblFwUpdateNote->setText(QStringLiteral("Готово — прибор запущен с новой прошивкой."));
+        appendLog(QStringLiteral("✅ Прошивка обновлена"));
+    } else {
+        // Подсказка «нажмите ещё раз» имеет смысл, только если прибор реально
+        // сидит в загрузчике; иначе повторное нажатие ничего не изменит.
+        // Про кабель не пишем: если с ним беда, это и так видно по индикатору
+        // связи (06.08.2026).
+        ui->lblFwUpdateNote->setText(QStringLiteral("Обновление не прошло. %1%2").arg(why,
+            inLoader
+            ? QStringLiteral("\nПрибор остался в загрузчике и ждёт повторной заливки — "
+                             "просто нажмите «Прошить» ещё раз.")
+            : QString()));
+        appendLog(QStringLiteral("⚠ Обновление не прошло: %1").arg(why));
+    }
 }
 
 // Цвет кнопок грубой калибровки RTC — наглядное состояние процесса:
@@ -1955,21 +2533,261 @@ void MainWindow::onLinkLost(const QString &reason)
     m_retryTimer.start(5000);   // автопереподключение
 }
 
+/* =====================================================================
+ *  РАБОЧАЯ ПАПКА (06.08.2026)
+ *
+ *  Одна папка на все файлы программы: дампы данных прибора, образы,
+ *  журналы испытаний, дальше — реестр приборов. До этого каждый путь жил
+ *  сам по себе: дампы падали в исходники LOGLSMW, журнал стенда — в
+ *  «Документы», образы помнили последнюю папку отдельно. Собрать всё в
+ *  одном месте удобнее и на своём компьютере, и в сетевой папке, откуда
+ *  данные можно прочитать без нашей программы.
+ * ===================================================================== */
+QString MainWindow::workDir() const
+{
+    QSettings st(kOrg, kApp);
+    QString dir = st.value(QStringLiteral("workDir")).toString();
+    if (dir.isEmpty()) {
+        // Пока не выбрана — рядом с документами пользователя: писать в
+        // исходники программы неправильно, а «Документы» есть всегда.
+        dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+            + QStringLiteral("/LogLSM");
+    }
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void MainWindow::setupWorkDir()
+{
+    ui->editWorkDir->setText(QDir::toNativeSeparators(workDir()));
+    connect(ui->btnWorkDirBrowse, &QPushButton::clicked, this, [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this,
+            QStringLiteral("Рабочая папка — дампы, образы, журналы"), workDir());
+        if (dir.isEmpty()) return;
+        QSettings(kOrg, kApp).setValue(QStringLiteral("workDir"), dir);
+        ui->editWorkDir->setText(QDir::toNativeSeparators(dir));
+        appendLog(QStringLiteral("Рабочая папка: %1").arg(QDir::toNativeSeparators(dir)));
+    });
+}
+
+/* =====================================================================
+ *  РЕЕСТР ПРИБОРОВ (06.08.2026) — ТЗ actual/device_registry_spec_v1.md
+ *
+ *  Учёт, а НЕ резервная копия. Паспорт и калибровки живут в приборе;
+ *  здесь только запись «какие приборы выпущены» и «что с ними делали».
+ *  Восстановление калибровок сознательно не делаем: прибор, вернувшийся
+ *  из эксплуатации, нуждается в новой калибровке, а не в прошлогодней.
+ *
+ *  Два CSV в рабочей папке. Формат выбран ради того, чтобы данные
+ *  читались БЕЗ нашей программы — открыл в Excel и всё видно.
+ *  Разделитель «;» и BOM: иначе русский Excel не разберёт ни колонки,
+ *  ни кириллицу.
+ * ===================================================================== */
+// ⚠ Расширение .txt, а РАЗМЕТКА внутри — csv-шная (06.08.2026, по просьбе).
+// Двойной щелчок открывает блокнот, а не Excel: на этом этапе таблица не нужна,
+// нужен читаемый файл. Разделитель «;» и BOM сохранены — когда понадобится,
+// файл открывается Excel'ем через «Открыть с помощью» и раскладывается по
+// колонкам без всякой возни.
+QString MainWindow::regIndexPath()  const { return workDir() + QStringLiteral("/index.txt"); }
+QString MainWindow::regEventsPath() const { return workDir() + QStringLiteral("/events.txt"); }
+
+// Экранирование поля CSV: кавычки удваиваем, всё берём в кавычки, если внутри
+// есть разделитель, кавычка или перевод строки.
+static QString csvField(const QString &s)
+{
+    QString v = s;
+    v.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    if (v.contains(QLatin1Char(';')) || v.contains(QLatin1Char('"'))) {
+        v.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+        v = QLatin1Char('"') + v + QLatin1Char('"');
+    }
+    return v;
+}
+
+// Дописать строку в CSV; если файла ещё нет — создать с BOM и заголовком.
+static bool csvAppend(const QString &path, const QString &header, const QString &line)
+{
+    const bool fresh = !QFileInfo::exists(path);
+    QFile f(path);
+    if (!f.open(QIODevice::Append | QIODevice::Text)) return false;
+    QTextStream ts(&f);
+    ts.setEncoding(QStringConverter::Utf8);
+    if (fresh) {
+        ts << QChar(0xFEFF);          // BOM — ради русского Excel
+        ts << header << '\n';
+    }
+    ts << line << '\n';
+    f.close();
+    return true;
+}
+
+// Номер прибора: БУКВА ТИПА + четыре цифры, например A0001 (06.08.2026).
+// Голая единица в паспорте выглядела недоразумением, а буква заодно сразу
+// говорит, что за прибор. Буква берётся из типа, определённого по датчику.
+// Нумерация СКВОЗНАЯ, общая для A и B: номер уникален сам по себе, иначе
+// A0001 и B0001 были бы разными приборами с одинаковым числом.
+//
+// ПЕРВЫЙ СВОБОДНЫЙ номер, а не «максимум + 1» (правка 06.08 по факту с железа).
+// Сперва было «максимум + 1», и один старый отладочный номер 22334456 в реестре
+// утянул нумерацию за собой: после записи прибора №1 программа предлагала
+// 22334457. Один случайный номер портил счётчик навсегда. Теперь занятые
+// номера просто пропускаются — мусор в реестре больше не задаёт тон.
+int MainWindow::regNextSerial() const
+{
+    QSet<int> used;
+    QFile f(regIndexPath());
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream ts(&f);
+        ts.setEncoding(QStringConverter::Utf8);
+        while (!ts.atEnd()) {
+            QString first = ts.readLine().section(QLatin1Char(';'), 0, 0)
+                                .remove(QChar(0xFEFF)).remove(QLatin1Char('"')).trimmed();
+            // Буква типа спереди — отбрасываем, считаем только цифры: нумерация
+            // сквозная, A0007 и B0007 занимают ОДИН и тот же номер.
+            while (!first.isEmpty() && !first.at(0).isDigit()) first.remove(0, 1);
+            bool ok = false;
+            const int n = first.toInt(&ok);      // заголовок и мусор просто не число
+            if (ok && n > 0) used.insert(n);
+        }
+        f.close();
+    }
+    int n = 1;
+    while (used.contains(n)) ++n;
+    return n;
+}
+
+void MainWindow::regEvent(const QString &serial, const QString &what, const QString &detail)
+{
+    const QString line = QStringLiteral("%1;%2;%3;%4")
+        .arg(csvField(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))),
+             csvField(serial), csvField(what), csvField(detail));
+    if (!csvAppend(regEventsPath(),
+                   QStringLiteral("время;номер;событие;подробности"), line))
+        appendLog(QStringLiteral("⚠ Реестр: не удалось записать событие в %1").arg(regEventsPath()));
+}
+
+// Строка прибора в index.csv. Если номер уже есть — перезаписываем строку
+// (прибор один, сведения о нём должны быть в одном месте), остальные не трогаем.
+void MainWindow::regUpsertDevice(const QString &serial, const QString &variant,
+                                 const QString &relDate, const QString &fw)
+{
+    // Колонки: номер (в нём уже есть буква типа), версия ПО, дата записи.
+    // «Дата выпуска» убрана (06.08) — она совпадает с днём паспортизации,
+    // то есть с датой записи, и держать её отдельно незачем. В самом приборе
+    // поле остаётся: там это часть паспорта.
+    Q_UNUSED(variant); Q_UNUSED(relDate);
+    static const QString header = QStringLiteral("номер;версия;дата записи");
+    // Версия — одной цепочкой через точки: 26.08.06.00.30. На экране она с
+    // пробелом между датой и временем (так читается лучше), но в файле пробел
+    // только мешает — версия становится похожа на два разных поля.
+    QString fwOne = fw.simplified();
+    fwOne.replace(QLatin1Char(' '), QLatin1Char('.'));
+    const QString row = QStringLiteral("%1;%2;%3")
+        .arg(csvField(serial), csvField(fwOne),
+             csvField(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+
+    const QString path = regIndexPath();
+    QStringList out;
+    bool replaced = false;
+    QFile f(path);
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream ts(&f);
+        ts.setEncoding(QStringConverter::Utf8);
+        while (!ts.atEnd()) {
+            const QString line = ts.readLine();
+            if (line.trimmed().isEmpty()) continue;
+            const QString key = line.section(QLatin1Char(';'), 0, 0)
+                                    .remove(QChar(0xFEFF)).remove(QLatin1Char('"')).trimmed();
+            if (key == serial) { out << row; replaced = true; }
+            else               { out << line; }
+        }
+        f.close();
+    }
+    if (!replaced) {
+        if (out.isEmpty()) out << header;
+        out << row;
+    }
+
+    // Пишем целиком через временный файл: так недописанный index.csv не
+    // затрёт прежний, если программа упадёт на середине.
+    const QString tmp = path + QStringLiteral(".tmp");
+    QFile t(tmp);
+    if (!t.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        appendLog(QStringLiteral("⚠ Реестр: не удалось записать %1").arg(path));
+        return;
+    }
+    { QTextStream ts(&t); ts.setEncoding(QStringConverter::Utf8);
+      ts << QChar(0xFEFF);
+      for (const QString &l : out) ts << l << '\n'; }
+    t.close();
+    QFile::remove(path);
+    if (!QFile::rename(tmp, path))
+        appendLog(QStringLiteral("⚠ Реестр: не удалось заменить %1").arg(path));
+}
+
+void MainWindow::setupRegistry()
+{
+    // «Следующий №» — номер из реестра плюс сегодняшняя дата. Оператору
+    // остаётся проверить вариант и нажать «Записать».
+    connect(ui->btnSerialNext, &QPushButton::clicked, this, [this] {
+        const int n = regNextSerial();
+        ui->editSerial->setText(QStringLiteral("%1%2")
+            .arg(m_variantCode == 0x0B ? QLatin1Char('B') : QLatin1Char('A'))
+            .arg(n, 4, 10, QLatin1Char('0')));
+        appendLog(QStringLiteral("Реестр: следующий свободный номер %1")
+                      .arg(ui->editSerial->text()));
+    });
+    // «Реестр…» открывает сам список приборов; если его ещё нет (ни одного
+    // прибора не записано) — открываем папку, чтобы было видно, куда смотреть.
+    connect(ui->btnRegistryOpen, &QPushButton::clicked, this, [this] {
+        const QString idx = regIndexPath();
+        if (QFileInfo::exists(idx)) {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(idx));
+        } else {
+            appendLog(QStringLiteral("Реестр пуст — файл %1 появится после первой записи паспорта")
+                          .arg(QDir::toNativeSeparators(idx)));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(workDir()));
+        }
+    });
+}
+
+// Индикатор связи, три состояния — см. объявление в mainwindow.h.
+// Индикатор — вся кнопка целиком (точка плохо видна).
+void MainWindow::setLinkLed(int state)
+{
+    struct { const char *bg, *br, *tip; } s[] = {
+        { "#C03030", "#9A2626", "Нет связи" },
+        { "#B8860B", "#8A6508", "Порт открыт, но регистратор не отвечает "
+                                "(отозвался только стенд)" },
+        { "#1D7A4C", "#16613C", "Регистратор на связи" },
+    };
+    const int i = qBound(0, state, 2);
+    ui->btnInd->setStyleSheet(QStringLiteral(
+        "QPushButton#btnInd { background: %1; border: 1px solid %2;"
+        " border-radius: 12px; color: rgba(255,255,255,150); font-size: 12px; }")
+        .arg(QLatin1String(s[i].bg), QLatin1String(s[i].br)));
+    ui->btnInd->setToolTip(QString::fromUtf8(s[i].tip));
+}
+
 void MainWindow::setConnectedUi(bool on, const QString &port)
 {
-    // Индикатор — вся кнопка целиком (точка плохо видна)
-    ui->btnInd->setStyleSheet(on
-    ? QStringLiteral("QPushButton#btnInd { background: #1D7A4C;"
-                     " border: 1px solid #16613C; border-radius: 12px;"
-                     " color: rgba(255,255,255,160); font-size: 12px; }")
-    : QStringLiteral("QPushButton#btnInd { background: #C03030;"
-                     " border: 1px solid #9A2626; border-radius: 12px;"
-                     " color: rgba(255,255,255,140); font-size: 12px; }"));
-                         
+    // Порт открылся — это ещё не «связь с регистратором»: на линии может
+    // сидеть один стенд. Зелёным индикатор станет в onResponse, когда ответит
+    // сам регистратор.
+    // ⚠ Признак сбрасывается и при ПОДКЛЮЧЕНИИ тоже: порт новый, кто там на
+    // линии — пока неизвестно. Иначе после переподключения индикатор зеленел
+    // сразу, помня ответ от прошлого раза (замечено на железе 06.08).
+    m_regSeen = false;
+    setLinkLed(on ? 1 : 0);
+
     ui->btnScan->setText(on ? port : QStringLiteral("ВКЛ"));
-    ui->lblDevCard->setText(on
-        ? QStringLiteral("LOGLSM-регистратор")
-        : QStringLiteral("LogLSMW · сервис регистратора"));
+    // Широкое поле справа от кнопки порта — под СВОДКУ по архиву (наработка и
+    // максимумы скорости/удара/температуры, см. «Данные»). Надпись
+    // «LOGLSM-регистратор» её затирала при каждом подключении и ничего не
+    // сообщала: имя прибора и так в заголовке окна. Оставляем поле пустым
+    // (06.08.2026).
+    if (on) ui->lblDevCard->clear();
+    else    ui->lblDevCard->setText(QStringLiteral("LogLSMW · сервис регистратора"));
     lblPort->setText(on
         ? QStringLiteral("%1 · %2").arg(port).arg(selectedBaud())
         : QStringLiteral("— · —"));
@@ -2033,12 +2851,34 @@ void MainWindow::setConnectedUi(bool on, const QString &port)
 
 void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
 {
+    // Любой ответ НЕ от стенда — это отозвался регистратор: индикатор зеленеет
+    // (06.08.2026). До этого он показывал лишь «порт открыт», и подключённый
+    // стенд один давал зелёный свет при молчащем регистраторе.
+    if (tag != TagStend && !m_regSeen) {
+        m_regSeen = true;
+        setLinkLed(2);
+    }
+
     // Ответы стенда (0x8C) разбираются ДО общего switch(cmd) ниже — коды
     // STEND_START/SPEED/STOP (0x04/0x05/0x06) численно совпадают с
     // FLASH_READ_ID/FLASH_ERASE/FLASH_PAGE_ERASE регистратора, иначе ответ
     // стенда попал бы в обработчик флеш-команд (см. devicecontroller.h).
     if (tag == TagStend) {
         stendHandleResponse(cmd, payload);
+        return;
+    }
+
+    // Заливка прошивки (05.08.2026) — ДО общего switch: коды 0x39..0x3D
+    // приложение не знает, отвечает на них загрузчик, и разбирать их вместе
+    // с обычными командами незачем.
+    if (tag == TagFw) {
+        fwUpdateHandle(cmd, payload);
+        return;
+    }
+
+    // Чтение внутренней Flash (0x3E) — свой разбор, до общего switch.
+    if (tag == TagIflash) {
+        if (cmd == LtpCmd::IFLASH_READ) iflashHandle(payload);
         return;
     }
 
@@ -2145,6 +2985,19 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
             // 13.07.2026) — служит разделителем перед модулями: LogLSMaE00.
             ui->lblDevName->setText(id == 0x70 ? QStringLiteral("LogLSMb")
                                                : QStringLiteral("LogLSMa"));
+            // ВАРИАНТ ПРИБОРА — ОПРЕДЕЛЯЕТСЯ САМ, по WHO_AM_I датчика
+            // (06.08.2026): 0x6C = LSM6DSO = A, 0x70 = LSM6DSV320X = B. Это
+            // железный признак, ошибиться нельзя, поэтому руками его больше не
+            // выбирают: поле оставлено как показ, но заблокировано. Раньше
+            // оператор мог записать в паспорт вариант, которого в приборе нет.
+            // Тип прибора запоминаем, но отдельного поля для него больше нет
+            // (06.08.2026): буква типа и так стоит в начале номера — A0001,
+            // а сам датчик виден в «Данные» → WHO_AM_I. Код нужен для буквы
+            // номера и для байта варианта в паспорте.
+            if (id == 0x6C || id == 0x70) {
+                m_variantCode       = (id == 0x70) ? 0x0B : 0x0A;
+                m_variantFromSensor = true;
+            }
             // График 2 «пики» = вторая шкала того же vib1 — виден на ОБОИХ
             // вариантах (19.07.2026, пересмотр: раньше прятали на A). На B здесь
             // естественно лягут пики физического high-g акселерометра.
@@ -2161,6 +3014,7 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                     .arg(dd,2,10,QLatin1Char('0')).arg(hh,2,10,QLatin1Char('0'))
                     .arg(mi,2,10,QLatin1Char('0'));
                 ui->lblFwVersion->setText(ver);          // индикатор на «Данные»
+                ui->editFwVer->setText(ver);             // и рядом с номером в паспорте
                 appendLog(QStringLiteral("[RX] прошивка регистратора собрана: %1").arg(ver));
                 // Имя устройства ИЗ ПРОШИВКИ (байты 6+, ASCII, null-terminated) —
                 // хранится в контроллере. Если пришло — перезаписывает fallback.
@@ -2173,6 +3027,7 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
                 }
             } else {
                 ui->lblFwVersion->setText(QStringLiteral("нет (старая прошивка)"));
+                ui->editFwVer->setText(QStringLiteral("нет"));
                 appendLog(QStringLiteral("[RX] прошивка не сообщает версию (старая — без поля версии)"));
             }
             // ОБЕ версии — в ЗАГОЛОВКЕ окна, в одну строку: приложение (W) и
@@ -2680,31 +3535,55 @@ void MainWindow::onResponse(quint8 cmd, const QByteArray &payload, quint32 tag)
         // [19..20]=year u16(LE), [21]=month, [22]=day.
         if (payload.size() < 23 || d[0] != 0) break;
         const bool valid = (d[1] != 0);
+        m_passportPresent = valid;      // для гейта повторной паспортизации
         if (!valid) {
             appendLog(QStringLiteral("[RX] Паспорт не задан (стр.123)"));
             ui->editSerial->setText(QString());
-            ui->editProdDate->setText(QString());
             break;
         }
         char ser[17];
         std::memcpy(ser, d + 2, 16);
         ser[16] = '\0';                                     // серийник — C-строка до '\0'
         ui->editSerial->setText(QString::fromLatin1(ser));
-        ui->cmbDevVariant->setCurrentIndex(quint8(d[18]) == 0x0B ? 1 : 0);
+        ui->editSerial->setCursorPosition(0);   // иначе виден хвост длинного номера
+        // ⚠ Тип берём с ДАТЧИКА, а не из паспорта: живой WHO_AM_I вернее
+        // записанного когда-то. Из паспорта показываем, только пока датчик не
+        // опознан; расхождение — повод перезаписать паспорт.
+        if (m_variantFromSensor && quint8(d[18]) != m_variantCode)
+            appendLog(QStringLiteral("⚠ Паспорт: записанный тип не совпадает с датчиком — "
+                                     "перезапишите паспорт"));
         quint16 y; std::memcpy(&y, d + 19, 2);
         const int mo = quint8(d[21]), da = quint8(d[22]);
         const QDate date(y, mo, da);
-        ui->editProdDate->setText((y == 0) ? QString()            // записан без даты
-            : date.isValid() ? date.toString(QStringLiteral("yyyy-MM-dd"))
-            : QStringLiteral("%1-%2-%3").arg(y,4,10,QLatin1Char('0'))
-                  .arg(mo,2,10,QLatin1Char('0')).arg(da,2,10,QLatin1Char('0')));
-        appendLog(QStringLiteral("[RX] Паспорт: %1").arg(ui->editSerial->text()));
+        // Дату показывать негде (поле убрано) — она уходит в журнал.
+        appendLog(QStringLiteral("[RX] Паспорт: %1, дата %2")
+                      .arg(ui->editSerial->text(),
+                           (y == 0) ? QStringLiteral("не задана")
+                           : date.isValid() ? date.toString(QStringLiteral("yyyy-MM-dd"))
+                           : QStringLiteral("%1-%2-%3").arg(y,4,10,QLatin1Char('0'))
+                                 .arg(mo,2,10,QLatin1Char('0')).arg(da,2,10,QLatin1Char('0'))));
         break;
     }
     case LtpCmd::PASSPORT_SET:
-        appendLog(d && d[0]==0
-            ? QStringLiteral("[RX] Паспорт записан (стр.123)")
-            : QStringLiteral("[RX] Паспорт: ошибка записи"));
+        if (d && d[0] == 0) {
+            appendLog(QStringLiteral("[RX] Паспорт записан (стр.123)"));
+            // Реестр приборов (06.08.2026): пишем ТОЛЬКО когда прибор
+            // подтвердил запись — иначе в списке появлялись бы приборы,
+            // которых нет.
+            const QString ser = ui->editSerial->text().trimmed();
+            if (!ser.isEmpty()) {
+                regUpsertDevice(ser,
+                    m_variantCode == 0x0B ? QStringLiteral("B") : QStringLiteral("A"),
+                    QString(),                      // дата выпуска = дата записи
+                    ui->lblFwVersion->text().trimmed());
+                regEvent(ser, QStringLiteral("паспорт записан"),
+                         QStringLiteral("тип %1")
+                             .arg(m_variantCode == 0x0B ? QStringLiteral("B") : QStringLiteral("A")));
+                appendLog(QStringLiteral("Реестр: прибор %1 записан").arg(ser));
+            }
+        } else {
+            appendLog(QStringLiteral("[RX] Паспорт: ошибка записи"));
+        }
         break;
     case LtpCmd::ACT_HISTORY: {
         // 0x2E: [0]=err, [1..2]=count u16 событий, далее count×[type u8 | ts u32].
@@ -3452,12 +4331,57 @@ void MainWindow::onProtoError(quint8 cmd, quint8 code, const QString &name)
                   .arg(cmd, 2, 16, QLatin1Char('0'))
                   .arg(code, 2, 16, QLatin1Char('0'))
                   .arg(name));
+
+    // Чтение внутренней Flash (06.08.2026): ответ с флагом ошибки приходит СЮДА,
+    // мимо onResponse, — например когда прошивка старая и команды 0x3E не знает.
+    // Без сброса состояние «идёт чтение» висело вечно, и кнопка переставала
+    // работать до перезапуска программы.
+    if (m_iflash.running && cmd == LtpCmd::IFLASH_READ) {
+        m_iflash.running = false;
+        ui->lblIflashAddr->setText(code == 0x01
+            ? QStringLiteral("прошивка не умеет читать внутр. Flash")
+            : QStringLiteral("ошибка чтения"));
+    }
 }
 
 void MainWindow::onRequestFailed(quint8 cmd)
 {
+    // GO ответа не ждёт: прибор отвечает и в ту же миллисекунду сбрасывается,
+    // так что молчание тут — норма. Операция закрыта ещё на шаге END, поэтому
+    // даже строку «[ТАЙМАУТ]» не пишем — она выглядела бы как ошибка сразу
+    // после успешной заливки.
+    if (cmd == LtpCmd::BOOT_GO) return;
+
+    // Собеседник замолчал — индикатор в жёлтый: порт открыт, а отвечать некому
+    // (сняли питание, выдернули кабель, прибор ушёл в сон). 06.08.2026: раньше
+    // жёлтый включался только при закрытии порта и при уходе в Stop2, поэтому
+    // обесточенный прибор оставался «зелёным». Позеленеет сам от первого же
+    // ответа — см. onResponse, ничего нажимать не надо.
+    if (m_regSeen) {
+        m_regSeen = false;
+        setLinkLed(1);
+    }
+
     appendLog(QStringLiteral("[ТАЙМАУТ] cmd=0x%1 — нет ответа после повторов")
                   .arg(cmd, 2, 16, QLatin1Char('0')));
+
+    // Чтение внутренней Flash молчанием — снять «идёт чтение», иначе кнопка
+    // «Прочитать» залипнет до перезапуска программы (06.08.2026).
+    if (m_iflash.running && cmd == LtpCmd::IFLASH_READ) {
+        m_iflash.running = false;
+        ui->lblIflashAddr->setText(QStringLiteral("нет ответа"));
+    }
+
+    // Заливка прошивки: молчание на любом её шаге — стоп всей операции, иначе
+    // прогресс замрёт навсегда, а кнопка останется в состоянии «Стоп».
+    // Прибор при этом цел: он в загрузчике и ждёт повторной заливки.
+    if (m_fw.running && cmd >= LtpCmd::BOOT_ENTER && cmd < LtpCmd::BOOT_GO) {
+        fwUpdateFinish(false, (m_fw.phase <= 2)
+            ? QStringLiteral("Прибор не ответил на команду. Возможно, версия без загрузчика.")
+            : QStringLiteral("Нет ответа на шаге %1.").arg(m_fw.phase),
+            m_fw.phase >= 2);   // на фазе 1 управление ещё не передавали
+        return;
+    }
 
     // Одиночный клик по сегменту 1/2 «завис» жёлтым без ответа — таймаут
     // переводит его в ошибку (красный), не оставляя гореть вечно (21.07.2026).
@@ -3558,6 +4482,10 @@ void MainWindow::onRequestFailed(quint8 cmd)
         // Не спамить опросами в спящее устройство — редкий PING вместо
         // часов/температур, пока регистратор не вернётся (см. m_regAwol).
         m_regAwol = true;
+        // Индикатор обратно в жёлтый: порт открыт, но регистратора не слышно.
+        // Зазеленеет сам, как только он отзовётся (onResponse). 06.08.2026.
+        m_regSeen = false;
+        setLinkLed(1);
     }
 
     // Если тайм-аут случился при FLASH_READ во время бинарного поиска
@@ -3580,6 +4508,16 @@ void MainWindow::onRequestFailed(quint8 cmd)
             QTimer::singleShot(1500, this, [this] { flashBinSearchStart(); });
         }
     }
+}
+
+// Перекраска заголовка при смене фокуса — см. applyCaptionColors выше.
+void MainWindow::changeEvent(QEvent *e)
+{
+    QMainWindow::changeEvent(e);
+#ifdef Q_OS_WIN
+    if (e->type() == QEvent::ActivationChange)
+        applyCaptionColors(winId(), isActiveWindow());
+#endif
 }
 
 void MainWindow::onCounters(quint32 tx, quint32 rx, quint32 crcErrors)
@@ -4063,7 +5001,7 @@ void MainWindow::setupStend()
         }
         QSettings st(kOrg, kApp);
         const QString lastDir = st.value(QStringLiteral("memtest/lastImgDir"),
-                                          QStringLiteral("actual/test_dumps")).toString();
+                                          workDir()).toString();
         const QString path = QFileDialog::getOpenFileName(
             this, QStringLiteral("Образ Регистратора — выбрать файл (.hex)"),
             lastDir, QStringLiteral("Intel HEX (*.hex *.ihex);;Все файлы (*)"));
@@ -4109,7 +5047,7 @@ void MainWindow::setupStend()
         }
         QSettings st(kOrg, kApp);
         const QString lastDir = st.value(QStringLiteral("stend/lastJournalDir"),
-            QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)).toString();
+                                          workDir()).toString();
         const QString path = QFileDialog::getOpenFileName(
             this, QStringLiteral("Журнал испытания — выбрать файл"), lastDir,
             QStringLiteral("Журнал испытания (LogLSM_stend_*.txt);;Текстовые файлы (*.txt);;Все файлы (*)"));
@@ -5926,8 +6864,7 @@ void MainWindow::stendJournalOpen()
     stendUpdateFlashStat();
 
     const QString ts   = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
-    const QString path = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
-                         + QStringLiteral("/LogLSM_stend_") + ts + QStringLiteral(".txt");
+    const QString path = workDir() + QStringLiteral("/LogLSM_stend_") + ts + QStringLiteral(".txt");
     m_journalFile.setFileName(path);
     if (!m_journalFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         appendLog(QStringLiteral("Стенд: не удалось создать журнал: ") + path);
@@ -8291,14 +9228,9 @@ void MainWindow::dataSaveFlow()
 void MainWindow::startDataDump(bool continueWave)
 {
     if (!m_link->isOpen()) { appendLog(QStringLiteral("⚠ Нет подключения")); return; }
-    // Папка по умолчанию — test_dumps в исходниках приложения (28.07.2026).
-    QString baseDir =
-#ifdef LOGLSMW_SRC_DIR
-        QStringLiteral(LOGLSMW_SRC_DIR "/test_dumps");
-#else
-        QCoreApplication::applicationDirPath() + QStringLiteral("/test_dumps");
-#endif
-    QDir().mkpath(baseDir);   // создать, если ещё нет
+    // Рабочая папка пользователя (06.08.2026). Раньше дампы падали в
+    // test_dumps внутри исходников LOGLSMW — неудобно и не переносимо.
+    const QString baseDir = workDir();
     const QString def = baseDir + QStringLiteral("/dump_%1.hex")
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyMMdd_HHmm")));
     const QString path = QFileDialog::getSaveFileName(
